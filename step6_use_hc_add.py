@@ -1,8 +1,14 @@
+import inspect
 from xdsl.context import Context
-from xdsl.ir import Region, Block
+from xdsl.ir import Region, Block, Operation
 from xdsl.dialects.builtin import Builtin, ModuleOp, i32
 from xdsl.dialects import func, arith
-
+from xdsl.pattern_rewriter import (
+    RewritePattern,
+    PatternRewriter,
+    GreedyRewritePatternApplier,
+    PatternRewriteWalker,
+)
 from hc_dialect import HiCompiler, HCAdd
 
 
@@ -40,10 +46,68 @@ def build_module(ctx: Context) -> ModuleOp:
     module = ModuleOp(ops=[fn])
     return module
 
+# -----------------------------------------------------------------------------
+#  Lowering pattern: hc.add -> arith.addi
+# -----------------------------------------------------------------------------
+
+class LowerHCAddPattern(RewritePattern):
+    def match_and_rewrite(self, op: Operation, rewriter: PatternRewriter):
+        # Debug: uncomment if you want to see traversal
+        print("VISIT:", op.name)
+
+        if op.name != "hc.add":
+            return
+
+        # hc.add has two operands
+        lhs, rhs = op.operands
+
+        # Replacement op
+        new_add = arith.AddiOp(lhs, rhs)
+
+        rewriter.replace_op(
+            op,
+            new_ops=[new_add],
+            new_results=[new_add.result],
+            safe_erase=True,
+        )
+
+
+def apply_lowering(module: ModuleOp) -> None:
+    applier = GreedyRewritePatternApplier([LowerHCAddPattern()])
+
+    # Some xdsl builds have extra kwargs; enable recursion if available.
+    init_sig = inspect.signature(PatternRewriteWalker.__init__)
+    kwargs = {}
+    for k in ("walk_regions", "apply_recursively", "walk_into_regions"):
+        if k in init_sig.parameters:
+            kwargs[k] = True
+
+    walker = PatternRewriteWalker(applier, **kwargs)
+
+    # Walk/rewrite the function bodies explicitly
+    for top_block in module.body.blocks:
+        for op in top_block.ops:
+            if isinstance(op, func.FuncOp):
+                if hasattr(walker, "rewrite_region"):
+                    walker.rewrite_region(op.body)
+                else:
+                    # fallback: rewrite_op on the function op if that implies walking regions in your build
+                    walker.rewrite_op(op)
+
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 
 def main():
     ctx = build_context()
     module = build_module(ctx)
+
+    print("=== BEFORE LOWERING ===")
+    print(module)
+
+    apply_lowering(module)
+
+    print("\n=== AFTER LOWERING ===")
     print(module)
 
 
