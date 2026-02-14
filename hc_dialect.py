@@ -8,7 +8,7 @@ from xdsl.irdl import (
 from xdsl.dialects.builtin import IntegerType
 
 # -----------------------------
-# Operation: hc.add
+# Operations
 # -----------------------------
 @irdl_op_definition
 class HCAdd(IRDLOperation):
@@ -21,12 +21,26 @@ class HCAdd(IRDLOperation):
     # One i32 result
     res = result_def(IntegerType)
 
+@irdl_op_definition
+class HCMul(IRDLOperation):
+    name = "hc.mul"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
+
+
+@irdl_op_definition
+class HCSub(IRDLOperation):
+    name = "hc.sub"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
 # -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
-    (HCAdd,),      # register operations here
+    (HCAdd, HCMul, HCSub),      # register operations here
     (),  # attrs
 )
 

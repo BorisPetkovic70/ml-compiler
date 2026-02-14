@@ -9,7 +9,7 @@ from xdsl.pattern_rewriter import (
     GreedyRewritePatternApplier,
     PatternRewriteWalker,
 )
-from hc_dialect import HiCompiler, HCAdd
+from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul
 
 
 def build_context() -> Context:
@@ -25,18 +25,27 @@ def build_module(ctx: Context) -> ModuleOp:
     # Constants: 1 and 2
     c1 = arith.ConstantOp.from_int_and_width(1, 32)
     c2 = arith.ConstantOp.from_int_and_width(2, 32)
+    c3 = arith.ConstantOp.from_int_and_width(3, 32)
+    c4 = arith.ConstantOp.from_int_and_width(4, 32)
 
-    # Our custom operation: %2 = hc.add %0, %1 : i32
     hc_add = HCAdd(
         operands=[c1.result, c2.result],
         result_types=[i32],
     )
+    hc_mul = HCMul(
+        operands=[hc_add.results[0], c3.result],
+        result_types=[i32],
+    )
+    hc_sub = HCSub(
+        operands=[hc_mul.results[0], c4.result],
+        result_types=[i32],
+    )
 
     # Return the result
-    ret = func.ReturnOp(hc_add.results[0])  # or hc_add.res
+    ret = func.ReturnOp(hc_sub.results[0])
 
-    # Block containing the constants + hc_add + return
-    block = Block(ops=[c1, c2, hc_add, ret])
+    # Block containing the constants + hc ops + return
+    block = Block(ops=[c1, c2, c3, c4, hc_add, hc_mul, hc_sub, ret])
 
     # Function returning i32
     fn = func.FuncOp("my_func", ([], [i32]))
@@ -55,19 +64,24 @@ class LowerHCAddPattern(RewritePattern):
         # Debug: uncomment if you want to see traversal
         print("VISIT:", op.name)
 
-        if op.name != "hc.add":
+        if op.name not in ("hc.add", "hc.mul", "hc.sub"):
             return
 
-        # hc.add has two operands
+        # operations have two operands
         lhs, rhs = op.operands
-
-        # Replacement op
-        new_add = arith.AddiOp(lhs, rhs)
+        if op.name == "hc.add":
+            new_op = arith.AddiOp(lhs, rhs)
+        elif op.name == "hc.mul":
+            new_op = arith.MuliOp(lhs, rhs)
+        elif op.name == "hc.sub":
+            new_op = arith.SubiOp(lhs, rhs)
+        else:
+            raise Exception("Operation not supported")
 
         rewriter.replace_op(
             op,
-            new_ops=[new_add],
-            new_results=[new_add.result],
+            new_ops=[new_op],
+            new_results=[new_op.result],
             safe_erase=True,
         )
 
