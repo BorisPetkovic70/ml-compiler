@@ -35,12 +35,18 @@ class HCSub(IRDLOperation):
     lhs = operand_def(IntegerType)
     rhs = operand_def(IntegerType)
     res = result_def(IntegerType)
+
+@irdl_op_definition
+class HCRelu(IRDLOperation):
+    name = "hc.relu"
+    x = operand_def(IntegerType)
+    res = result_def(IntegerType)
 # -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
-    (HCAdd, HCMul, HCSub),      # register operations here
+    (HCAdd, HCMul, HCSub, HCRelu),      # register operations here
     (),  # attrs
 )
 
