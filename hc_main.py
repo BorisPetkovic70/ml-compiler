@@ -7,6 +7,7 @@ from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu
 from middle_end.pipeline import (
     MiddleEndPipeline, MiddleEndPipelineConfig
 )
+from simulator.interpreter import Interpreter
 
 def build_context() -> Context:
     ctx = Context()
@@ -64,17 +65,25 @@ def main():
     print("=== HIGH LEVEL (hc.*) ===")
     print(module)
 
+    hc_interpreter = Interpreter()
+    result_before = hc_interpreter.run_module(module, "my_func")
+    print("\nResult (interpreted, before lowering):", result_before)
 
     config = MiddleEndPipelineConfig(
         apply_lowering=True,
-        apply_constant_folding=True,
-        apply_dce=True,
+        apply_constant_folding=False,
+        apply_dce=False,
         run_analysis=False,
         debug_mode=True,
     )
 
     middle_end_pipeline = MiddleEndPipeline(config)
     middle_end_pipeline.apply_passes(module)
+
+    lower_interpreter = Interpreter()
+    result_after = lower_interpreter.run_module(module, "my_func")
+    print("\nResult (interpreted, after lowering):", result_after)
+
 
 if __name__ == "__main__":
     main()
