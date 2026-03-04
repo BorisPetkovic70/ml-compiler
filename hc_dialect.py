@@ -41,12 +41,24 @@ class HCRelu(IRDLOperation):
     name = "hc.relu"
     x = operand_def(IntegerType)
     res = result_def(IntegerType)
+
+@irdl_op_definition
+class HCPow(IRDLOperation):
+    name = "hc.pow"
+    base = operand_def(IntegerType)
+    exp  = operand_def(IntegerType)
+    res  = result_def(IntegerType)
+
+    def verify_(self):
+        if self.base.type != self.exp.type or self.res.type != self.base.type:
+            raise ValueError("hc.pow: base, exp, and res must have same integer type")
+
 # -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
-    (HCAdd, HCMul, HCSub, HCRelu),      # register operations here
+    (HCAdd, HCMul, HCSub, HCRelu, HCPow),      # register operations here
     (),  # attrs
 )
 
