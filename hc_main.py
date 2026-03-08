@@ -3,7 +3,7 @@ from xdsl.ir import Region, Block
 from xdsl.dialects.builtin import Builtin, ModuleOp, i32
 from xdsl.dialects import func, arith
 
-from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax
+from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
 from middle_end.pipeline import (
     MiddleEndPipeline, MiddleEndPipelineConfig
 )
@@ -50,13 +50,21 @@ def build_module(ctx: Context) -> ModuleOp:
         operands=[hc_pow.results[0], c3.result],
         result_types=[i32],
     )
+    hc_min = HCMin(
+        operands=[hc_max.results[0], hc_pow.results[0]],
+        result_types=[i32],
+    )
 
     # Return the result
-    ret = func.ReturnOp(hc_max.results[0])
+    ret = func.ReturnOp(hc_min.results[0])
 
     # Block containing the constants + hc ops + return
     block = Block(
-        ops=[c1, c2, c3, c4, c5, hc_add, hc_mul, hc_sub, hc_relu, hc_pow, hc_max, ret]
+        ops=[
+            c1, c2, c3, c4, c5, 
+            hc_add, hc_mul, hc_sub, hc_relu, hc_pow, hc_max, hc_min,
+            ret
+        ]
     )
 
     # Function returning i32

@@ -106,6 +106,11 @@ class Interpreter:
                 self._set(op.results[0], max(self._get(a), self._get(b)))
                 continue
 
+            if name == "hc.min":
+                a, b = op.operands
+                self._set(op.results[0], min(self._get(a), self._get(b)))
+                continue
+
             # --- lowered arith ops (so you can run after lowering too) ---
             if name == "arith.addi":
                 a, b = op.operands
@@ -132,15 +137,17 @@ class Interpreter:
                 lhs = self._get(a)
                 rhs = self._get(b)
 
-                # In xDSL: sgt == 4
                 pred = op.predicate.value.data
 
-                if pred != 4:
-                    raise RuntimeError(f"Only sgt supported in interpreter, got predicate: {pred}\nOp: {op}")
-
-                # signed greater-than
-                result = 1 if lhs > rhs else 0
-
+                # In xDSL: sgt == 4; lgt == 2
+                if pred == 4:  # signed greater-than
+                    result = 1 if lhs > rhs else 0
+                elif pred == 2:  # signed less-than
+                    result = 1 if lhs < rhs else 0
+                else:
+                    raise RuntimeError(
+                        f"Only sgt and slt supported in interpreter, got predicate: {pred}\nOp: {op}"
+                    )
                 self._set(op.results[0], result)
                 continue
 

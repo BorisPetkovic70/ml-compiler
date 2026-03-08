@@ -64,12 +64,23 @@ class HCMax(IRDLOperation):
         if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
             raise ValueError("hc.max: operands and result must have the same integer type")
 
+@irdl_op_definition
+class HCMin(IRDLOperation):
+    name = "hc.min"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
+
+    def verify_(self):
+        if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
+            raise ValueError("hc.min: operands and result must have the same integer type")
+
 # -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
-    (HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax),      # register operations here
+    (HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin),      # register operations here
     (),  # attrs
 )
 
