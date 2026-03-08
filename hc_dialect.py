@@ -53,12 +53,23 @@ class HCPow(IRDLOperation):
         if self.base.type != self.exp.type or self.res.type != self.base.type:
             raise ValueError("hc.pow: base, exp, and res must have same integer type")
 
+@irdl_op_definition
+class HCMax(IRDLOperation):
+    name = "hc.max"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
+
+    def verify_(self):
+        if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
+            raise ValueError("hc.max: operands and result must have the same integer type")
+
 # -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
-    (HCAdd, HCMul, HCSub, HCRelu, HCPow),      # register operations here
+    (HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax),      # register operations here
     (),  # attrs
 )
 

@@ -3,7 +3,7 @@ from xdsl.ir import Region, Block
 from xdsl.dialects.builtin import Builtin, ModuleOp, i32
 from xdsl.dialects import func, arith
 
-from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow
+from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax
 from middle_end.pipeline import (
     MiddleEndPipeline, MiddleEndPipelineConfig
 )
@@ -20,7 +20,7 @@ def build_context() -> Context:
 def build_module(ctx: Context) -> ModuleOp:
     c1 = arith.ConstantOp.from_int_and_width(1, 32)
     c2 = arith.ConstantOp.from_int_and_width(2, 32)
-    c3 = arith.ConstantOp.from_int_and_width(3, 32)
+    c3 = arith.ConstantOp.from_int_and_width(1025, 32)
     c4 = arith.ConstantOp.from_int_and_width(10, 32)
 
     hc_add = HCAdd(
@@ -46,12 +46,18 @@ def build_module(ctx: Context) -> ModuleOp:
         operands=[c2, c4], # Base and exponent
         result_types=[i32],
     )
+    hc_max = HCMax(
+        operands=[hc_pow.results[0], c3.result],
+        result_types=[i32],
+    )
 
     # Return the result
-    ret = func.ReturnOp(hc_pow.results[0])
+    ret = func.ReturnOp(hc_max.results[0])
 
     # Block containing the constants + hc ops + return
-    block = Block(ops=[c1, c2, c3, c4, c5, hc_add, hc_mul, hc_sub, hc_relu, hc_pow, ret])
+    block = Block(
+        ops=[c1, c2, c3, c4, c5, hc_add, hc_mul, hc_sub, hc_relu, hc_pow, hc_max, ret]
+    )
 
     # Function returning i32
     fn = func.FuncOp("my_func", ([], [i32]))
@@ -81,7 +87,7 @@ def main():
         apply_constant_folding=False,
         apply_dce=False,
         run_analysis=False,
-        debug_mode=True,
+        debug_mode=False,
     )
 
     middle_end_pipeline = MiddleEndPipeline(config)

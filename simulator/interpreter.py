@@ -101,6 +101,11 @@ class Interpreter:
                 self._set(op.results[0], self._get(a) ** self._get(b))
                 continue
 
+            if name == "hc.max":
+                a, b = op.operands
+                self._set(op.results[0], max(self._get(a), self._get(b)))
+                continue
+
             # --- lowered arith ops (so you can run after lowering too) ---
             if name == "arith.addi":
                 a, b = op.operands
@@ -122,11 +127,45 @@ class Interpreter:
                 self._set(op.results[0], max(self._get(a), self._get(b)))
                 continue
 
+            if name == "arith.cmpi":
+                a, b = op.operands
+                lhs = self._get(a)
+                rhs = self._get(b)
+
+                # In xDSL: sgt == 4
+                pred = op.predicate.value.data
+
+                if pred != 4:
+                    raise RuntimeError(f"Only sgt supported in interpreter, got predicate: {pred}\nOp: {op}")
+
+                # signed greater-than
+                result = 1 if lhs > rhs else 0
+
+                self._set(op.results[0], result)
+                continue
+
             if name == "scf.for":
                 # Try: recognize "pow lowering" pattern and shortcut it.
                 if self._try_eval_pow_lowering(op):
                     continue
                 raise RuntimeError("Unsupported scf.for (not recognized as pow lowering)")
+            if name == "scf.if":
+                # Treat non-zero as True
+                cond = self._get(op.operands[0]) != 0
+
+                then_region = op.regions[0]
+                else_region = op.regions[1] if len(op.regions) > 1 else None
+
+                if cond:
+                    yielded = self._eval_scf_if_region_yield(then_region)
+                else:
+                    if else_region is None:
+                        raise RuntimeError("scf.if has no else region but condition is false")
+                    yielded = self._eval_scf_if_region_yield(else_region)
+
+                # Assume scf.if returns exactly one value
+                self._set(op.results[0], yielded)
+                continue
 
             # --- return ---
             if name == "func.return":
@@ -231,4 +270,14 @@ class Interpreter:
         self._set(op.results[0], result)
         return True
 
+    def _eval_scf_if_region_yield(self, region) -> int:
+        """
+        Simplified: Assume region has 1 block and the last op is scf.yield with 1 operand.
+        We ignore everything else in the region and just read the yielded SSA value.
+        """
+        block = list(region.blocks)[0]
+        last = list(block.ops)[-1]
+        if last.name != "scf.yield" or len(last.operands) != 1:
+            raise RuntimeError(f"Expected region to end with scf.yield(1), got: {last}")
+        return self._get(last.operands[0])
 

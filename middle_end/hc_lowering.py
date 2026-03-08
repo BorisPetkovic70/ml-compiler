@@ -16,7 +16,9 @@ class LowerHCPattern(RewritePattern):
         # Debug: uncomment if you want to see traversal
         # print("VISIT:", op.name)
 
-        if op.name not in ("hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow"):
+        if op.name not in (
+            "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max"
+        ):
             return
 
         # ---------------- hc.add ----------------
@@ -113,4 +115,32 @@ class LowerHCPattern(RewritePattern):
                 safe_erase=True,
             )
             return
+        # ---------------- hc.max ----------------
+        if op.name == "hc.max":
+            lhs, rhs = op.operands
+            ty = op.results[0].type
+
+            cmp = arith.CmpiOp(lhs, rhs, "sgt")  # signed greater-than
+
+            then_block = Block(arg_types=[])
+            then_block.add_ops([scf.YieldOp(lhs)])
+
+            else_block = Block(arg_types=[])
+            else_block.add_ops([scf.YieldOp(rhs)])
+
+            if_op = scf.IfOp(
+                cmp.result,
+                [ty],
+                Region(then_block),
+                Region(else_block),
+            )
+
+            rewriter.replace_op(
+                op,
+                new_ops=[cmp, if_op],
+                new_results=[if_op.results[0]],
+                safe_erase=True,
+            )
+            return
+
 
