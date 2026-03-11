@@ -184,10 +184,11 @@ class Interpreter:
 
         raise RuntimeError("Block ended without func.return")
 
-    def run_module(self, module, func_name: str = "my_func") -> int:
+    def run_module(self, module,  args: list[int], func_name: str = "my_func") -> int:
         """
         Find func.func @func_name and execute its first block.
         """
+
         # module.body.blocks[0].ops usually contains top-level ops
         for top_block in module.body.blocks:
             for op in list(top_block.ops):
@@ -206,6 +207,13 @@ class Interpreter:
                     if name == func_name or (name is None and func_name == "my_func"):
                         # assume single-block body for now
                         body_block = list(op.body.blocks)[0]
+
+                        if len(args) != len(body_block.args):
+                            raise RuntimeError(
+                                f"Expected {len(body_block.args)} args, got {len(args)}"
+                            )
+                        for block_arg, value in zip(body_block.args, args):
+                            self._set(block_arg, value)
                         return self.run_block(body_block)
 
         raise RuntimeError(f"Function not found: {func_name}")
