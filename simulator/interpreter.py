@@ -56,7 +56,7 @@ class Interpreter:
         return self.env[id(v)]
 
     def _set(self, v: SSAValue, value: int) -> None:
-        print(f"Set SSAValue: {v} = {int(value)}")
+        # print(f"Set SSAValue: {v} = {int(value)}")
         self.env[id(v)] = int(value)
 
     def run_block(self, block) -> int:
@@ -185,10 +185,29 @@ class Interpreter:
         raise RuntimeError("Block ended without func.return")
 
     def run_module(self, module,  args: list[int], func_name: str = "my_func") -> int:
-        """
-        Find func.func @func_name and execute its first block.
-        """
+        """ Execute a single function from the given module using the interpreter.
 
+        This method locates `func.func @func_name` inside the module, binds the
+        provided runtime arguments to the function's entry block arguments,
+        and interprets the block sequentially until a `func.return` operation
+        is encountered.
+
+        Args:
+            module:
+                The xDSL ModuleOp containing the function to execute.
+
+            args:
+                A list of integer values that will be bound to the function's
+                input arguments (entry block arguments). The number of elements
+                must match the number of function parameters.
+
+            func_name:
+                The name of the function to execute. Defaults to "my_func".
+
+        Returns:
+            int:
+                The integer value returned by the `func.return` operation.
+        """
         # module.body.blocks[0].ops usually contains top-level ops
         for top_block in module.body.blocks:
             for op in list(top_block.ops):
@@ -217,6 +236,45 @@ class Interpreter:
                         return self.run_block(body_block)
 
         raise RuntimeError(f"Function not found: {func_name}")
+
+    def run_module_batch(
+        self,
+        module,
+        batch_args: list[list[int]],
+        func_name: str = "my_func"
+    ) -> list[int]:
+        """ Execute the same function multiple times with different argument sets.
+
+        This method repeatedly calls `run_module`, once for each list of
+        arguments in `batch_args`, effectively simulating batch execution.
+        Each inner list represents the input arguments for one function call.
+
+        Args:
+            module:
+                The xDSL ModuleOp containing the function to execute.
+
+            batch_args:
+                A list of argument lists. Each inner list contains the integer
+                values that will be passed as inputs to one invocation of the
+                function.
+
+            func_name:
+                The name of the function to execute. Defaults to "my_func".
+
+        Returns:
+            list[int]:
+                A list containing the return value of each function invocation,
+                in the same order as `batch_args`.
+        """
+        results = []
+
+        for args in batch_args:
+            # reset environment for each independent execution
+            self.env = {}
+            result = self.run_module(module, args=args, func_name=func_name)
+            results.append(result)
+
+        return results
 
     def _try_eval_pow_lowering(self, op) -> bool:
         """

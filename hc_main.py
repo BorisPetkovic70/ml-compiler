@@ -28,12 +28,14 @@ def main():
     ctx = build_context()
     module = import_onnx_to_hc_module(ctx, MODEL_PATH, "my_func")
 
-    print("=== HIGH LEVEL (hc.*) ===")
-    print(module)
-    input_val = [31]
+    # print("=== HIGH LEVEL (hc.*) ===")
+    # print(module)
+    input_batches = [[65], [44], [40], [35], [30], [18]]
 
     hc_interpreter = Interpreter()
-    result_before = hc_interpreter.run_module(module, args=input_val, func_name="my_func")
+    result_before = hc_interpreter.run_module_batch(
+        module, batch_args=input_batches, func_name="my_func"
+    )
     print("\nResult (interpreted, before lowering):", result_before)
 
     config = MiddleEndPipelineConfig(
@@ -46,11 +48,13 @@ def main():
 
     middle_end_pipeline = MiddleEndPipeline(config)
     middle_end_pipeline.apply_passes(module)
-    print("=== After lowering ===")
-    print(module)
+    # print("=== After lowering ===")
+    # print(module)
 
     lower_interpreter = Interpreter()
-    result_after = lower_interpreter.run_module(module, args=input_val, func_name="my_func")
+    result_after = lower_interpreter.run_module_batch(
+        module, batch_args=input_batches, func_name="my_func"
+    )
     print("\nResult (interpreted, after lowering):", result_after)
 
 
