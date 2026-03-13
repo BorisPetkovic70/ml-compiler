@@ -80,19 +80,19 @@ class LowerHCPattern(RewritePattern):
             base, exp = op.operands
             ty = op.results[0].type  # integer type
 
-            # constants for loop bounds/step
-            c0 = arith.ConstantOp.from_int_and_width(0, 32)
-            c1 = arith.ConstantOp.from_int_and_width(1, 32)
+            iv_ty = builtin.IndexType()
+
+            # loop-control constants must be index
+            c0 = arith.ConstantOp.from_int_and_width(0, iv_ty)
+            c1 = arith.ConstantOp.from_int_and_width(1, iv_ty)
+
+            # exponent is i32 -> cast to index for scf.for upper bound
+            exp_idx = arith.IndexCastOp(exp, iv_ty)
 
             # init accumulator = 1
             init = arith.ConstantOp.from_int_and_width(1, 32)
 
-            # scf.for (%i = 0; %i < exp; %i += 1) iter_args(%acc = init) -> (ty) { %acc2 = muli %acc, base; scf.yield %acc2 }
-            body = Block(arg_types=[ty, ty])
-
-            # Better: use index for iv and keep acc as ty.
-            # Let's construct it robustly:
-            iv_ty = builtin.IndexType()
+            # scf.for body arguments: (iv: index, acc: i32)
             body = Block(arg_types=[iv_ty, ty])
             iv, acc = body.args
 
@@ -101,7 +101,7 @@ class LowerHCPattern(RewritePattern):
 
             loop = scf.ForOp(
                 lb=c0.result,          # lower bound
-                ub=exp,                # upper bound (dynamic)
+                ub=exp_idx.result,     # upper bound
                 step=c1.result,        # step
                 iter_args=[init.result],
                 body=Region(body),
@@ -110,7 +110,7 @@ class LowerHCPattern(RewritePattern):
             # scf.ForOp returns the iter_args results
             rewriter.replace_op(
                 op,
-                new_ops=[c0, c1, init, loop],
+                new_ops=[c0, c1, exp_idx, init, loop],
                 new_results=[loop.results[0]],
                 safe_erase=True,
             )

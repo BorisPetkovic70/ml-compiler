@@ -1,0 +1,19 @@
+#/bin/sh
+MODEL_NAME="$1"
+MODEL_STEM="${MODEL_NAME%.onnx}"
+echo "Compiling backend..."
+
+# More robust way to determine script's location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLCHAIN_BIN_DIR="$SCRIPT_DIR/../../LLVM_IR/llvm-project/build/bin"
+BUILD_DIR=${SCRIPT_DIR}/../build
+
+${TOOLCHAIN_BIN_DIR}/mlir-opt ${BUILD_DIR}/${MODEL_STEM}_lowered.mlir \
+  -convert-scf-to-cf \
+  -convert-cf-to-llvm \
+  -convert-arith-to-llvm \
+  -convert-func-to-llvm \
+  -reconcile-unrealized-casts \
+  -o ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir"
+
