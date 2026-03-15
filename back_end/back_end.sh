@@ -20,3 +20,7 @@ echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir"
 ${TOOLCHAIN_BIN_DIR}/mlir-translate ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir \
     -mlir-to-llvmir -o ${BUILD_DIR}/${MODEL_STEM}_out.ll
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.ll"
+
+${TOOLCHAIN_BIN_DIR}/llc -O2 -filetype=asm \
+    ${BUILD_DIR}/${MODEL_STEM}_out.ll -o ${BUILD_DIR}/${MODEL_STEM}_out.s
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.s"
