@@ -24,3 +24,7 @@ echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.ll"
 ${TOOLCHAIN_BIN_DIR}/llc -O2 -filetype=asm \
     ${BUILD_DIR}/${MODEL_STEM}_out.ll -o ${BUILD_DIR}/${MODEL_STEM}_out.s
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.s"
+
+${TOOLCHAIN_BIN_DIR}/llc -filetype=obj ${BUILD_DIR}/${MODEL_STEM}_out.ll \
+    -o ${BUILD_DIR}/${MODEL_STEM}_out.o
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.o"
