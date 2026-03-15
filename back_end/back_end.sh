@@ -17,3 +17,6 @@ ${TOOLCHAIN_BIN_DIR}/mlir-opt ${BUILD_DIR}/${MODEL_STEM}_lowered.mlir \
   -o ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir"
 
+${TOOLCHAIN_BIN_DIR}/mlir-translate ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir \
+    -mlir-to-llvmir -o ${BUILD_DIR}/${MODEL_STEM}_out.ll
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.ll"
