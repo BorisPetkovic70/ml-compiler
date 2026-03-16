@@ -28,3 +28,11 @@ echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.s"
 ${TOOLCHAIN_BIN_DIR}/llc -filetype=obj ${BUILD_DIR}/${MODEL_STEM}_out.ll \
     -o ${BUILD_DIR}/${MODEL_STEM}_out.o
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.o"
+
+clang ${SCRIPT_DIR}/harness.c ${BUILD_DIR}/${MODEL_STEM}_out.o -o \
+    ${BUILD_DIR}/${MODEL_STEM}_run
+
+echo "Created executable: ${BUILD_DIR}/${MODEL_STEM}_run"
+echo "Running executable..."
+
+${BUILD_DIR}/${MODEL_STEM}_run 42
