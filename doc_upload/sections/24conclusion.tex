@@ -1,0 +1,26 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Conclusion}
+% -----------------------------
+    This tutorial demonstrated the complete journey of compiling a simple machine learning
+computation from a custom dialect to an executable program. We began by defining a HiCompiler dialect,
+introducing domain-specific operations that represent high-level computations.
+Next, we implemented lowering rules that translate these operations into standard MLIR dialects
+such as arith, enabling the program to move closer to hardware-level representation.
+After lowering, we applied compiler optimizations like constant folding and dead code
+elimination to simplify the program and improve efficiency. Once the IR was normalized
+and optimized, we used MLIR passes to convert the program into the LLVM dialect,
+which bridges MLIR and the LLVM compiler infrastructure. The LLVM dialect was then
+translated into LLVM IR, a low-level, platform-independent intermediate representation.
+    
+    Using LLVM tools, we compiled the LLVM IR into assembly and object files, preparing
+it for execution on the target machine. We then linked the compiled object with
+a small C harness, allowing the generated function to be called from a standard executable
+program. This final step enabled us to run and test the compiled model, confirming that
+the entire compilation pipeline works end to end. Overall, the tutorial illustrated how
+modern compiler infrastructures like MLIR and LLVM allow developers to design domain-specific
+languages, perform powerful optimizations, and ultimately generate efficient native executables.
+
+\end{document}

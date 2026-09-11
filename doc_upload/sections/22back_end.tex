@@ -1,0 +1,235 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Back end}
+% -----------------------------
+As a follow-up, we will create Bash scripts that automate the compilation pipeline
+for our model. These scripts will take the MLIR program produced after lowering and
+progressively convert it into LLVM IR, and then into a final executable. By using LLVM
+tools in the scripts, we can easily compile and run our MLIR-based model from the command line.
+
+\begin{lstlisting} [language=bash, caption={New scripts for the pipeline}]
+full_compiler.sh
+back_end
+├── back_end.sh
+\end{lstlisting}
+
+In the \path{back_end.sh} script, implement the first step of progressive compilation.
+\begin{lstlisting} [language=Python, caption={Creating LLVM IR by using mlir-opt}]
+#/bin/sh
+MODEL_NAME="$1"
+MODEL_STEM="${MODEL_NAME%.onnx}"
+echo "Compiling backend..."
+
+# More robust way to determine script's location
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOLCHAIN_BIN_DIR="$SCRIPT_DIR/../../LLVM_IR/llvm-project/build/bin"
+BUILD_DIR=${SCRIPT_DIR}/../build
+
+${TOOLCHAIN_BIN_DIR}/mlir-opt ${BUILD_DIR}/${MODEL_STEM}_lowered.mlir \
+  -convert-scf-to-cf \
+  -convert-cf-to-llvm \
+  -convert-arith-to-llvm \
+  -convert-func-to-llvm \
+  -reconcile-unrealized-casts \
+  -o ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir"
+\end{lstlisting}
+This command runs mlir-opt to apply a sequence of lowering passes that
+convert the MLIR program into the LLVM dialect. The passes progressively
+transform structured control flow (scf), control flow (cf), arithmetic
+operations (arith), and functions (func) into their LLVM equivalents.
+The result is written to a new file containing LLVM-level MLIR, which
+can later be translated into LLVM IR and compiled into an executable.
+Use it from our main pipeline script, together with \path{hc_main.py}.
+Define \path{full_compiler.py} script with following content:
+\begin{lstlisting} [language=Python, caption={Full compiler script implementation}]
+#!/usr/bin/env bash
+
+MODEL_NAME=${1:-score_model.onnx}
+
+echo "Using model: $MODEL_NAME"
+
+python3 hc_main.py "$MODEL_NAME"
+back_end/back_end.sh "$MODEL_NAME"
+\end{lstlisting}
+As you can see, for back end, we are using results previously generated in \path{hc_main.py}
+step, so we need to adjust that script to produce wanted files.
+In \path{hc_main.py}, add imports:
+
+\begin{lstlisting} [language=Python, caption={Needed imports}]
+from hc_dialect import HiCompiler
+from front_end.build_model import build_score_model, MODEL_PATH
+\end{lstlisting}
+
+Our \path{hc_main.py} now accepts model path argument, that we use to import
+onnx model.
+\begin{lstlisting} [language=Python, caption={Modified main function}]
+def main():
+    # Optional argument
+    model_arg = sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH
+    model_path = Path(model_arg)
+
+    # Extract base name (without extension)
+    model_name = model_path.stem
+
+    build_dir = Path("build")
+    build_dir.mkdir(exist_ok=True)
+
+    if not model_path.exists():
+        candidate = build_dir / model_path.name
+        if candidate.exists():
+            model_path = candidate
+        else:
+            model_path = build_dir / model_path.name
+            print(f"Model not found, building: {model_path}")
+            build_score_model(str(model_path))
+
+    original_file = build_dir / f"{model_name}_original.mlir"
+    lowered_file = build_dir / f"{model_name}_lowered.mlir"
+
+    ctx = build_context()
+    module = import_onnx_to_hc_module(
+        ctx, onnx_path=str(model_path), fn_name="my_func"
+    )
+
+    print("Saving high-level module...")
+    with open(original_file, "w", encoding="utf-8") as f:
+        f.write(str(module))
+
+    config = MiddleEndPipelineConfig(
+        apply_lowering=True,
+        apply_constant_folding=False,
+        apply_dce=False,
+        run_analysis=False,
+        debug_mode=False,
+    )
+
+    middle_end_pipeline = MiddleEndPipeline(config)
+    middle_end_pipeline.apply_passes(module)
+
+    print("Saving lowered module...")
+    with open(lowered_file, "w", encoding="utf-8") as f:
+        f.write(str(module))
+\end{lstlisting}
+Remove unnecessary imports from \path{hc_main.py}.
+All generated files will be placed inside build folder.
+
+You need to give execution rights to both newly created bash scripts:
+\begin{lstlisting} [language=bash, caption={Changing execution rights}]
+chmod +x full_compiler.sh
+chmod +x back_end/back_end.sh
+\end{lstlisting}
+
+
+If you run the \path{full_compiler.sh} script now, it will fail, since we need
+to fix a bug that we introduced when we implemented pow lowering. We need to
+use an IndexType for \path{scf.for} upper bound.
+Change lowering part of Pow operation in \path{hc_lowering} file:
+
+\begin{lstlisting} [language=Python, caption={Final Pow lowering}]
+        # ---------------- hc.pow ----------------
+        if op.name == "hc.pow":
+            base, exp = op.operands
+            ty = op.results[0].type  # integer type
+
+            iv_ty = builtin.IndexType()
+
+            # loop-control constants must be index
+            c0 = arith.ConstantOp.from_int_and_width(0, iv_ty)
+            c1 = arith.ConstantOp.from_int_and_width(1, iv_ty)
+
+            # exponent is i32 -> cast to index for scf.for upper bound
+            exp_idx = arith.IndexCastOp(exp, iv_ty)
+
+            # init accumulator = 1
+            init = arith.ConstantOp.from_int_and_width(1, 32)
+
+            # scf.for body arguments: (iv: index, acc: i32)
+            body = Block(arg_types=[iv_ty, ty])
+            iv, acc = body.args
+
+            mul = arith.MuliOp(acc, base)
+            body.add_ops([mul, scf.YieldOp(mul.result)])
+
+            loop = scf.ForOp(
+                lb=c0.result,          # lower bound
+                ub=exp_idx.result,     # upper bound
+                step=c1.result,        # step
+                iter_args=[init.result],
+                body=Region(body),
+            )
+
+            # scf.ForOp returns the iter_args results
+            rewriter.replace_op(
+                op,
+                new_ops=[c0, c1, exp_idx, init, loop],
+                new_results=[loop.results[0]],
+                safe_erase=True,
+            )
+            return
+\end{lstlisting}
+Now, if we run the script, we should see something like:
+\begin{lstlisting} [language=bash, caption={Output of the compiler script}]
+$ ./full_compiler.sh model_score.onnx
+Using model: model_score.onnx
+Model not found, building: build/model_score.onnx
+Saved ONNX model to: build/model_score.onnx
+Saving high-level module...
+Saving lowered module...
+Compiling backend...
+Created file: <some absolute path>/src/back_end/../build/model_score_llvm.mlir
+\end{lstlisting}
+
+Continue building our back end side. Add this to your \path{back_end.sh} script:
+\begin{lstlisting} [language=bash, caption={Using mlir-translate}]
+${TOOLCHAIN_BIN_DIR}/mlir-translate ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir \
+    -mlir-to-llvmir -o ${BUILD_DIR}/${MODEL_STEM}_out.ll
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.ll"
+\end{lstlisting}
+This command uses mlir-translate to convert the MLIR file in the LLVM dialect into LLVM IR.
+
+\begin{itemize}
+    \item The LLVM dialect is a representation used inside MLIR that models LLVM-style
+operations while still staying within the MLIR infrastructure. It is designed to
+look very similar to LLVM instructions but remains compatible with MLIR features
+such as dialects, passes, and transformations. In other words, it is a bridge between
+MLIR and LLVM, allowing MLIR programs to be gradually lowered toward LLVM.
+
+    \item LLVM IR (Intermediate Representation) is the core low-level language used by
+the LLVM compiler infrastructure. It is a platform-independent representation
+that is close to machine instructions but still abstract enough to allow further
+optimizations and analysis.
+\end{itemize}
+
+To produce assembly code, we can extend script with following command:
+
+This command uses llc, the LLVM static compiler, to convert LLVM IR into assembly code for the target architecture.
+
+\begin{lstlisting} [language=Python, caption={Using llc for assembly}]
+${TOOLCHAIN_BIN_DIR}/llc -O2 -filetype=asm \
+    ${BUILD_DIR}/${MODEL_STEM}_out.ll -o ${BUILD_DIR}/${MODEL_STEM}_out.s
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.s"
+\end{lstlisting}
+The input file \path{${MODEL_STEM}_out.ll} contains \texttt{LLVM IR}, and the options \texttt{-O2}
+and \texttt{-filetype=asm} tell \texttt{llc} to apply level-2
+optimizations and generate assembly output.
+
+To generate an object file, add:
+\begin{lstlisting} [language=Python, caption={Using llc for object file}]
+${TOOLCHAIN_BIN_DIR}/llc -filetype=obj ${BUILD_DIR}/${MODEL_STEM}_out.ll \
+    -o ${BUILD_DIR}/${MODEL_STEM}_out.o
+echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.o"
+\end{lstlisting}
+Command runs llc, the LLVM static compiler, to translate the LLVM IR file
+into a target-specific object file. The option \texttt{-filetype=obj}
+instructs llc to generate an object file (\texttt{.o}), which can later be
+linked with other object files or libraries to produce the final executable.
+
+Note: You can use \texttt{llvm-objdump -d \path{build/model_score_out.o}} to inspect
+object file. \path{llvm-objdump} is a part of LLVM toolchain
+that lets us verify that our
+\path{MLIR -> LLVM -> machine code} pipeline produced the expected instructions.
+
+\end{document}

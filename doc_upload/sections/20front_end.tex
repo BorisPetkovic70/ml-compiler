@@ -1,0 +1,342 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Front end}
+% -----------------------------
+So far, we have been constructing modules manually using our HC dialect operations.
+In this step, we will move toward a more realistic workflow by loading a model from
+an ONNX file instead of building the IR by hand. Since we do not yet have
+an ONNX model prepared, we will first create a small example model and export
+it to ONNX format. Then we will implement a simple front end that reads the ONNX
+graph and maps its nodes to our corresponding HC operations, producing an HC module
+that can be further compiled.
+
+To organize this part of the project, we will create a folder with the following structure:
+\begin{lstlisting} [language=bash, caption={Front end folder structure}]
+front_end
+├── __init__.py
+├── build_model.py
+├── loader.py
+\end{lstlisting}
+
+In \path{build_model.py}, import \texttt{onnx} related packages and define final model path:
+\begin{lstlisting} [language=Python, caption={onnx imports}]
+import onnx
+from onnx import helper, TensorProto
+
+MODEL_PATH = "score_model.onnx"
+\end{lstlisting}
+
+
+\begin{lstlisting} [language=Python, caption={Building model}]
+def build_score_model(path: str = MODEL_PATH):
+    # ------------------------------------------------------------
+    # Parameters
+    # ------------------------------------------------------------
+    MU = 40.0
+    ALPHA = 2.0
+    P = 2.0
+    LO = 0.0
+    HI = 1000.0
+
+    # ------------------------------------------------------------
+    # Input / Output
+    # ------------------------------------------------------------
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [])
+    y = helper.make_tensor_value_info("score", TensorProto.FLOAT, [])
+
+    # ------------------------------------------------------------
+    # Constant initializers
+    # ------------------------------------------------------------
+    mu_init = helper.make_tensor("mu", TensorProto.FLOAT, [], [MU])
+    a_init  = helper.make_tensor("alpha", TensorProto.FLOAT, [], [ALPHA])
+    p_init  = helper.make_tensor("p", TensorProto.FLOAT, [], [P])
+    lo_init = helper.make_tensor("lo", TensorProto.FLOAT, [], [LO])
+    hi_init = helper.make_tensor("hi", TensorProto.FLOAT, [], [HI])
+
+    # ------------------------------------------------------------
+    # Graph nodes
+    # ------------------------------------------------------------
+    nodes = [
+        # d1 = x - mu
+        helper.make_node("Sub", ["x", "mu"], ["d1"], name="sub_x_mu"),
+
+        # d2 = mu - x
+        helper.make_node("Sub", ["mu", "x"], ["d2"], name="sub_mu_x"),
+
+        # abs_d = max(d1, d2)
+        helper.make_node("Max", ["d1", "d2"], ["abs_d"], name="abs_max"),
+
+        # e = pow(abs_d, p)
+        helper.make_node("Pow", ["abs_d", "p"], ["e"], name="pow"),
+
+        # s = alpha * e
+        helper.make_node("Mul", ["alpha", "e"], ["s"], name="scale"),
+
+        # lower = max(s, lo)
+        helper.make_node("Max", ["s", "lo"], ["lower"], name="clamp_low"),
+
+        # clamped = min(lower, hi)
+        helper.make_node("Min", ["lower", "hi"], ["clamped"], name="clamp_high"),
+
+        # score = relu(clamped)
+        helper.make_node("Relu", ["clamped"], ["score"], name="relu"),
+    ]
+
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="ScoreGraph",
+        inputs=[x],
+        outputs=[y],
+        initializer=[mu_init, a_init, p_init, lo_init, hi_init],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 13)],
+        producer_name="score_builder",
+    )
+
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"Saved ONNX model to: {path}")
+
+
+if __name__ == "__main__":
+    build_score_model()
+\end{lstlisting}
+Run the script and observe generated model using \path{netron.app} website.
+Then, in \path{loader.py}, we will build HC module based on provided onnx model.
+Start with importing required packages and our dialect:
+\begin{lstlisting} [language=Python, caption={Loader imports}]
+import onnx
+from xdsl.dialects import func, arith
+
+from xdsl.context import Context
+from xdsl.dialects.builtin import ModuleOp, i32
+from xdsl.ir import Region, Block
+
+from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
+\end{lstlisting}
+Define helper functions for types conversion:
+\begin{lstlisting} [language=Python, caption={Defining loader helper functions}]
+# --------------------------------------
+#  Helper functions
+# --------------------------------------
+def _onnx_tensor_to_scalar_int(tensor_proto) -> int:
+    arr = onnx.numpy_helper.to_array(tensor_proto)
+    # Restriction: scalar or 1-element tensor
+    if arr.size != 1:
+        raise ValueError(f"Only scalar/1-element constants supported, got shape {arr.shape}")
+    return int(arr.reshape(()))
+
+def _make_i32_const(value: int) -> arith.ConstantOp:
+    return arith.ConstantOp.from_int_and_width(int(value), 32)
+\end{lstlisting}
+
+\begin{lstlisting} [language=Python, caption={Defining model loader}]
+# --------------------------------------
+#  Loader
+# --------------------------------------
+def import_onnx_to_hc_module(
+    ctx: Context, onnx_path: str, fn_name: str="main"
+) -> ModuleOp:
+    model = onnx.load(onnx_path)
+    graph = model.graph
+
+    # Map ONNX value names -> SSAValue (results)
+    env: dict[str, object] = {}
+
+    # Assume one scalar input
+    # Map ONNX graph input name to function/block argument
+    entry_block = Block(arg_types=[i32])
+    x_name = graph.input[0].name
+    env[x_name] = entry_block.args[0]
+
+    ops = []
+
+    # 1) Initializers (weights/constants stored in graph.initializer)
+    for init in graph.initializer:
+        v = _onnx_tensor_to_scalar_int(init)
+        c = _make_i32_const(v)
+        ops.append(c)
+        env[init.name] = c.result
+
+    # 2) Constant nodes (op_type == "Constant")
+    # ONNX Constant usually stores a tensor in attribute "value"
+    def emit_constant_node(node):
+        value_attr = None
+        for a in node.attribute:
+            if a.name == "value":
+                value_attr = a.t
+        if value_attr is None:
+            raise ValueError("Constant node without 'value' attribute")
+        v = _onnx_tensor_to_scalar_int(value_attr)
+        c = _make_i32_const(v)
+        ops.append(c)
+        env[node.output[0]] = c.result
+
+    # 3) Node lowering
+    for node in graph.node:
+        if node.op_type == "Constant":
+            emit_constant_node(node)
+            continue
+
+        def get(name: str):
+            if name not in env:
+                raise KeyError(f"ONNX value not found yet: {name} (node {node.op_type})")
+            return env[name]
+
+        if node.op_type == "Add":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            hc_add = HCAdd(operands=[a, b], result_types=[i32])
+            ops.append(hc_add)
+            env[node.output[0]] = hc_add.results[0]
+            continue
+
+        if node.op_type == "Sub":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            hc_sub = HCSub(operands=[a, b], result_types=[i32])
+            ops.append(hc_sub)
+            env[node.output[0]] = hc_sub.results[0]
+            continue
+
+        if node.op_type == "Mul":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            hc_mul = HCMul(operands=[a, b], result_types=[i32])
+            ops.append(hc_mul)
+            env[node.output[0]] = hc_mul.results[0]
+            continue
+
+        if node.op_type == "Relu":
+            x = get(node.input[0])
+            hc_relu = HCRelu(operands=[x], result_types=[i32])
+            ops.append(hc_relu)
+            env[node.output[0]] = hc_relu.results[0]
+            continue
+
+        if node.op_type == "Pow":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            hc_pow = HCPow(operands=[a, b], result_types=[i32])
+            ops.append(hc_pow)
+            env[node.output[0]] = hc_pow.results[0]
+            continue
+
+        if node.op_type == "Max":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            hc_max = HCMax(operands=[a, b], result_types=[i32])
+            ops.append(hc_max)
+            env[node.output[0]] = hc_max.results[0]
+            continue
+
+        if node.op_type == "Min":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            hc_min = HCMin(operands=[a, b], result_types=[i32])
+            ops.append(hc_min)
+            env[node.output[0]] = hc_min.results[0]
+            continue
+
+        raise NotImplementedError(f"Unsupported ONNX op: {node.op_type}")
+
+    # 4) Determine outputs (graph.output)
+    if len(graph.output) != 1:
+        raise ValueError("For now: expect exactly 1 model output")
+    out_name = graph.output[0].name
+    if out_name not in env:
+        raise KeyError(f"Graph output {out_name} not produced")
+    ret = func.ReturnOp(env[out_name])
+    ops.append(ret)
+
+    for op in ops:
+        entry_block.add_op(op)
+
+    fn = func.FuncOp(fn_name, ([i32], [i32]))
+    fn.body = Region(entry_block)
+
+    return ModuleOp(ops=[fn])
+\end{lstlisting}
+This function converts a neural-network model stored in the ONNX format into an
+intermediate representation (IR) expressed using the HC dialect in xDSL. The goal
+is to transform the graph-based ONNX model into a sequence of SSA operations that
+can be further processed, optimized, or executed by your compiler infrastructure.
+
+The loader reads the ONNX graph and builds an internal mapping between ONNX value
+names and SSA values in the IR. Model inputs are represented as function arguments,
+while constants and parameters are turned into constant operations. Each ONNX node
+is then translated into an equivalent operation in the HC dialect, gradually constructing
+the computation inside the function’s entry block.
+
+Once all nodes are translated, the loader determines the graph’s output and adds a
+return operation to produce the final value. The resulting operations are placed into
+a function, and that function is wrapped inside a module, producing a complete IR
+representation of the original ONNX model that can be executed or transformed later
+in the compilation pipeline.
+
+Since the module we just build has one argument that we can pass as an input, we need to
+modify our \path{interpreter.py} to also support this feature by changing \path{run\_module}
+signature and providing logic for args handling:
+\begin{lstlisting} [language=Python, caption={Argument handling in interpreter}]
+def run_module(self, module,  args: list[int], func_name: str = "my_func") -> int:
+...
+                    if name == func_name or (name is None and func_name == "my_func"):
+                        # assume single-block body for now
+                        body_block = list(op.body.blocks)[0]
+
+                        if len(args) != len(body_block.args):
+                            raise RuntimeError(
+                                f"Expected {len(body_block.args)} args, got {len(args)}"
+                            )
+                        for block_arg, value in zip(body_block.args, args):
+                            self._set(block_arg, value)
+                        return self.run_block(body_block)
+\end{lstlisting}
+
+Now, in our \path{hc_main.py}, we can entirely remove \path{build_module} function and use
+loader.
+
+\begin{lstlisting} [language=Python, caption={hc\_main.py imports}]
+from front_end.build_model import MODEL_PATH
+from front_end.loader import import_onnx_to_hc_module
+\end{lstlisting}
+Load the model and run it through interpreter.
+\begin{lstlisting} [language=Python, caption={Using loader in main}]
+def main():
+    ctx = build_context()
+    module = import_onnx_to_hc_module(ctx, MODEL_PATH, "my_func")
+
+    print("=== HIGH LEVEL (hc.*) ===")
+    print(module)
+    input_val = [31]
+
+    hc_interpreter = Interpreter()
+    result_before = hc_interpreter.run_module(module, args=input_val, func_name="my_func")
+    print("\nResult (interpreted, before lowering):", result_before)
+
+    config = MiddleEndPipelineConfig(
+        apply_lowering=True,
+        apply_constant_folding=False,
+        apply_dce=False,
+        run_analysis=False,
+        debug_mode=False,
+    )
+
+    middle_end_pipeline = MiddleEndPipeline(config)
+    middle_end_pipeline.apply_passes(module)
+    print("=== After lowering ===")
+    print(module)
+
+    lower_interpreter = Interpreter()
+    result_after = lower_interpreter.run_module(module, args=input_val, func_name="my_func")
+    print("\nResult (interpreted, after lowering):", result_after)
+\end{lstlisting}
+Try different values of \path{input_val}, and observe how output changes when we diverge from
+the value 40.
+
+\end{document}

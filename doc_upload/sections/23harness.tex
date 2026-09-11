@@ -1,0 +1,44 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Harness}
+% -----------------------------
+We can also create a small a small driver program that invokes compiled code and allows
+it to be executed and tested inside a normal application.
+We implement the harness in C because the compiled function follows the C calling convention,
+making it straightforward to import it with extern and link it directly into the executable.
+
+Create a file \path{back_end/harness.c}:
+\begin{lstlisting} [language=C, caption={Simple C application}]
+extern int my_func(int);
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char **argv) {
+    int a = atoi(argv[1]);   // convert command-line string to int
+    printf("Result of execution for (%d): %d\n", a, my_func(a));
+}
+\end{lstlisting}
+And extend \path{back_end.sh}:
+\begin{lstlisting} [language=Python, caption={}]
+clang ${SCRIPT_DIR}/harness.c ${BUILD_DIR}/${MODEL_STEM}_out.o -o \
+    ${BUILD_DIR}/${MODEL_STEM}_run
+
+echo "Created executable: ${BUILD_DIR}/${MODEL_STEM}_run"
+echo "Running executable..."
+
+${BUILD_DIR}/${MODEL_STEM}_run 42
+\end{lstlisting}
+
+By running our function with different values, we can see that results will produce
+a U-shaped curve with a minimum at 40, like expected.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.5\textwidth]{run_results.png}
+    \caption{Execution results}
+    \label{fig:results}
+\end{figure}
+
+\end{document}

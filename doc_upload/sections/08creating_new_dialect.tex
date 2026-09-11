@@ -1,0 +1,42 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Creating new dialect}
+% -----------------------------
+Add imports and define custom dialect.
+\begin{lstlisting} [language=Python, caption={Define new dialect}]
+from xdsl.context import Context
+from xdsl.ir import Dialect
+from xdsl.dialects.builtin import Builtin
+from xdsl.dialects import func
+
+
+# For now: Empty HiCompiler dialect (no ops / attributes yet)
+HiCompiler = Dialect(
+    "hc",      # dialect name: will give ops like `hc.foo` later
+    (),        # operations (we will add ops here in later steps)
+    (),        # attributes / types (also later)
+)
+\end{lstlisting}
+The point of this step is just is just to see how can we register and load the dialect.
+\begin{lstlisting} [language=Python, caption={Define new dialect}]
+def main() -> None:
+    ctx = Context()
+
+    # Load the built-in dialects
+    ctx.load_dialect(Builtin)
+    ctx.load_dialect(func.Func)
+
+    # Now load your custom HiCompiler dialect instance
+    ctx.load_dialect(HiCompiler)
+
+    # The point is just: 'can we register and load the dialect without errors?'
+    print(ctx)
+    print("\nHiCompiler dialect registered and loaded successfully.")
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\end{document}

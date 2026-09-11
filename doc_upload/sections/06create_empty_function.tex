@@ -1,0 +1,76 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+
+% -----------------------------
+\section{Create empty function}
+% -----------------------------
+Goal in this section is to create a module that contains one function symbol (no real body yet), and print it.
+Create new file \texttt{step3\_one\_function.py} and add imports:
+\begin{lstlisting} [language=Python, caption={Necessary imports}]
+from xdsl.context import Context
+from xdsl.ir import Region, Block
+from xdsl.printer import Printer
+
+from xdsl.dialects.builtin import Builtin, ModuleOp
+from xdsl.dialects import func
+\end{lstlisting}
+Create a new function bellow it, for building context.
+\begin{lstlisting} [language=Python, caption={Build context implementation}]
+def build_context() -> Context:
+    ctx = Context()
+    # Load the builtin dialect into the context
+    ctx.load_dialect(Builtin)
+    ctx.load_dialect(func.Func)
+    return ctx
+\end{lstlisting}
+
+Create a new function in the same file, for building the module.
+\begin{lstlisting} [language=Python, caption={Build module implementation}]
+def build_module_with_empty_func(ctx: Context) -> ModuleOp:
+    # Create an empty module
+    module = ModuleOp(ops=[])
+
+    # Create an *empty* function: no arguments, no results (for now)
+    func_name = "my_empty_func"
+
+    # Most xdsl versions mirror MLIR's `func.func` here:
+    #   func.FuncOp(name, (arg_types, result_types))
+    # With no args/results: ([], [])
+    fn = func.FuncOp(func_name, ([], []))
+
+    # Make the function a declaration by giving it an empty body region.
+    fn.body = Region()
+
+    # Replace the whole body region
+    # with a Region that has a single Block containing `fn`.
+    module.body = Region(Block(ops=[fn]))
+
+    return module
+\end{lstlisting}
+Add main function and invoke module creation:
+\begin{lstlisting} [language=Python, caption={Main function implementation}]
+def main() -> None:
+    ctx = build_context()
+    module = build_module_with_empty_func(ctx)
+
+    # Create a printer
+    printer = Printer()
+    printer.print_op(module)
+    print()
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+Run the script from the terminal:
+\begin{lstlisting} [language=bash, caption={}]
+python3 step3_one_function.py
+\end{lstlisting}
+You should get something like:
+\begin{lstlisting} [language=bash, caption={Console print}]
+builtin.module {
+  func.func @my_empty_func() -> ()
+}
+\end{lstlisting}
+
+\end{document}

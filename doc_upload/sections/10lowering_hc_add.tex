@@ -1,0 +1,95 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Lowering hc.add → arith.addi}
+% -----------------------------
+In this section we will define a rewrite pattern that will match hc.add operation and replace it with arith.addi.
+This will be the first step in our implementation for lowering the code.
+Modify import section by adding \texttt{inspect} and \texttt{Operation} packages.
+\begin{lstlisting} [language=Python, caption={New imports}]
+import inspect
+from xdsl.ir import Region, Block, Operation
+
+from xdsl.pattern_rewriter import (
+    RewritePattern,
+    PatternRewriter,
+    GreedyRewritePatternApplier,
+    PatternRewriteWalker,
+)
+\end{lstlisting}
+Create lowering pattern:
+\begin{lstlisting} [language=Python, caption={Lowering pattern for add operation}]
+# ----------------------------------------------
+#  Lowering pattern: hc.add -> arith.addi
+# ----------------------------------------------
+
+class LowerHCAddPattern(RewritePattern):
+    def match_and_rewrite(self, op: Operation, rewriter: PatternRewriter):
+        # Debug: uncomment if you want to see traversal
+        # print("VISIT:", op.name)
+
+        if op.name != "hc.add":
+            return
+
+        # hc.add has two operands
+        lhs, rhs = op.operands
+
+        # Replacement op
+        new_add = arith.AddiOp(lhs, rhs)
+
+        rewriter.replace_op(
+            op,
+            new_ops=[new_add],
+            new_results=[new_add.result],
+            safe_erase=True,
+        )
+\end{lstlisting}
+Apply lowering using newly written pattern.
+\begin{lstlisting} [language=Python, caption={Applying lowering}]
+def apply_lowering(module: ModuleOp) -> None:
+    applier = GreedyRewritePatternApplier([LowerHCAddPattern()])
+
+    # Some xdsl builds have extra kwargs; enable recursion if available.
+    init_sig = inspect.signature(PatternRewriteWalker.__init__)
+    kwargs = {}
+    for k in ("walk_regions", "apply_recursively", "walk_into_regions"):
+        if k in init_sig.parameters:
+            kwargs[k] = True
+
+    walker = PatternRewriteWalker(applier, **kwargs)
+
+    # Walk/rewrite the function bodies explicitly
+    for top_block in module.body.blocks:
+        for op in top_block.ops:
+            if isinstance(op, func.FuncOp):
+                if hasattr(walker, "rewrite_region"):
+                    walker.rewrite_region(op.body)
+                else:
+                    # fallback: rewrite_op on the function op if that implies walking regions in your build
+                    walker.rewrite_op(op)
+\end{lstlisting}
+Redefine main function so that it prints module before and after lowering.
+\begin{lstlisting} [language=Python, caption={Main function}]
+ def main():
+     ctx = build_context()
+     module = build_module(ctx)
+
+     print("=== BEFORE LOWERING ===")
+     print(module)
+     apply_lowering(module)
+     print("\n=== AFTER LOWERING ===")
+     print(module)
+\end{lstlisting}
+In the logs, you should see that operations were really lowered.
+
+
+\textbf{Exercises}
+\begin{itemize}
+    \item Extend dialect with \path{mul} operation and implement lowering
+    \item Build module with \path{mul} operation
+    \item Extend dialect with \path{sub} operation and implement lowering
+    \item Build module with \path{sub} operation
+\end{itemize}
+
+\end{document}

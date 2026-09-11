@@ -1,0 +1,158 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Refactoring time}
+% -----------------------------
+So far, we have placed all of our logic inside the main function to keep things simple
+and focused on understanding the core concepts. Now, as the codebase grows, we will start
+refactoring it into smaller, well-structured components to improve readability, modularity,
+and maintainability.
+What we are trying to achieve is following structure: 
+\begin{lstlisting} [language=bash, caption={Folder structure}]
+middle_end
+├── analysis.py
+├── constant_folding.py
+├── dead_code_elimination.py
+├── hc_lowering.py
+├── __init__.py
+├── pipeline.py
+hc_dialect.py
+hc_main.py
+\end{lstlisting}
+
+\begin{itemize}
+    \item Create \path{middle_end} folder and given Python files
+    \item Create an empty \path{__init__.py}
+    \item Extract sections from \path{hc_main.py} into appropriate files
+\end{itemize}
+
+\path{pipeline.py} serves as a central integration point that orchestrates and connects
+multiple compiler passes into a coherent transformation pipeline.
+Inside of it, add imports:
+\begin{lstlisting} [language=Python, caption={Pipeline imports}]
+import inspect
+from dataclasses import dataclass
+from xdsl.dialects import func
+from xdsl.dialects.builtin import ModuleOp
+from xdsl.pattern_rewriter import (
+    GreedyRewritePatternApplier,
+    PatternRewriteWalker,
+    RewritePattern,
+)
+
+from .analysis import analyze
+from .constant_folding import FoldArithInts
+from .dead_code_elimination import apply_dce
+from .hc_lowering import LowerHCPattern
+\end{lstlisting}
+Bellow it, create configuration class that will help us to toggle specific passes easier.
+\begin{lstlisting} [language=Python, caption={Configuration class}]
+# -----------------------------
+# Configuration object
+# -----------------------------
+@dataclass(frozen=True)
+class MiddleEndPipelineConfig:
+    run_analysis: bool = False
+    debug_mode: bool = False
+
+    apply_lowering: bool = True
+    apply_constant_folding: bool = True
+    apply_dce: bool = True
+\end{lstlisting}
+One helper function, based on previous implementation:
+\begin{lstlisting} [language=Python, caption={apply\_pass helper function}]
+def _apply_pass(module: ModuleOp, pattern: RewritePattern) -> None:
+    applier = GreedyRewritePatternApplier([pattern()])
+
+    # Some xdsl builds have extra kwargs; enable recursion if available.
+    init_sig = inspect.signature(PatternRewriteWalker.__init__)
+    kwargs = {}
+    for k in ("walk_regions", "apply_recursively", "walk_into_regions"):
+        if k in init_sig.parameters:
+            kwargs[k] = True
+
+    walker = PatternRewriteWalker(applier, **kwargs)
+
+    # Walk/rewrite the function bodies explicitly
+    for top_block in module.body.blocks:
+        for op in top_block.ops:
+            if isinstance(op, func.FuncOp):
+                if hasattr(walker, "rewrite_region"):
+                    walker.rewrite_region(op.body)
+                elif hasattr(walker, "rewrite_op"):
+                    walker.rewrite_op(op)
+                else:
+                    raise RuntimeError("No suitable rewrite entrypoint found on PatternRewriteWalker.")
+\end{lstlisting}
+And the middle end pipeline itself:
+\begin{lstlisting} [language=Python, caption={Middle end pipeline class}]
+# -----------------------------
+# Pipeline
+# -----------------------------
+@dataclass
+class MiddleEndPipeline:
+    def __init__(self, config: MiddleEndPipelineConfig):
+        self.config = config
+
+    def apply_passes(self, module: ModuleOp) -> None:
+        if self.config.apply_lowering:
+            # Apply lowering
+            _apply_pass(module, LowerHCPattern)
+            self._print_module(module, "=== AFTER LOWERING  (arith.*) ===")
+
+        if self.config.apply_constant_folding:
+            # Apply constant folding
+            _apply_pass(module, FoldArithInts)
+            self._print_module(module, "=== AFTER CONSTANT FOLDING ===")
+
+
+        if self.config.apply_dce:
+            # Apply dead code elimination
+            apply_dce(module)
+            self._print_module(module, "=== AFTER DEAD CODE ELIMINATION ===")
+
+        if self.config.run_analysis:
+            # Analyze pass
+            analyze(module)
+
+    def _print_module(self, module: ModuleOp, message: str):
+        if self.config.debug_mode:
+            print(message + "\n")
+            print(module)
+\end{lstlisting}
+
+For our main file, provide necessary imports:
+\begin{lstlisting} [language=Python, caption={Middle-end imports}]
+from middle_end.pipeline import (
+    MiddleEndPipeline, MiddleEndPipelineConfig
+)
+\end{lstlisting}
+Then, create wanted configuration and apply middle-end passes:
+\begin{lstlisting} [language=Python, caption={Middle-end imports}]
+def main():
+    ctx = build_context()
+    module = build_module(ctx)
+
+    print("=== HIGH LEVEL (hc.*) ===")
+    print(module)
+
+
+    config = MiddleEndPipelineConfig(
+        apply_lowering=True,
+        apply_constant_folding=True,
+        apply_dce=True,
+        run_analysis=False,
+        debug_mode=True,
+    )
+
+    middle_end_pipeline = MiddleEndPipeline(config)
+    middle_end_pipeline.apply_passes(module)
+\end{lstlisting}
+
+MiddleEndPipeline now encapsulates the execution of middle-end compiler passes and drives them according to a configurable setup.
+Its \path{apply_passes} method conditionally applies lowering, constant folding, dead code elimination,
+and analysis based on flags defined in MiddleEndPipelineConfig, while \path{_print_module} provides optional
+debug output after each stage to help trace how the IR evolves through the pipeline.
+
+\end{document}

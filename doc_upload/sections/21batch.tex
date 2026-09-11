@@ -1,0 +1,66 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Batch}
+% -----------------------------
+A batch refers to processing multiple inputs together instead of executing a computation
+separately for each input. In practice, it means running the same function or model multiple
+times with different input values while treating them as a group.
+
+Batch execution is useful because it allows repeated computations to be organized
+and handled more efficiently. It simplifies workflows where the same model must be
+evaluated on many inputs, such as testing, data processing, or machine learning inference.
+
+Using batches is also convenient because it reduces repetitive code and provides
+a clearer interface for running multiple evaluations, while often enabling better
+performance in real systems that can process many inputs in parallel.
+
+At the moment, we have a \path{run_module} that executes a single
+function from the module using the interpreter.
+It binds the provided runtime values to the function’s input arguments (entry
+block arguments) and then interprets the operations in the block sequentially
+until a \path{func.return} is reached, producing the final result.
+
+\path{run_module_batch} extends this idea to batch execution. Instead of running
+the function once, it repeatedly calls \path{run_module} with different argument sets,
+allowing the same function to be evaluated multiple times with different inputs
+and collecting all results into a list.
+
+Start implementation by extending \texttt{Interpreter} class with \path{run_module_batch}
+method:
+\begin{lstlisting} [language=Python, caption={Batch execution implementation}]
+    def run_module_batch(
+        self,
+        module,
+        batch_args: list[list[int]],
+        func_name: str = "my_func"
+    ) -> list[int]:
+        results = []
+
+        for args in batch_args:
+            # reset environment for each independent execution
+            self.env = {}
+            result = self.run_module(module, args=args, func_name=func_name)
+            results.append(result)
+
+        return results
+\end{lstlisting}
+Then we can modify our \path{hc_main.py} to use batch execution. Add a couple of input batches
+and replace \path{hc_interpreter.run_module} with \path{hc_interpreter.run_module_batch} calls:
+\begin{lstlisting} [language=Python, caption={Batch execution}]
+    input_batches = [[65], [44], [40], [35], [30], [18]]
+    ...
+    result_before = hc_interpreter.run_module_batch(
+        module, batch_args=input_batches, func_name="my_func"
+    )
+    ...
+    result_after = lower_interpreter.run_module_batch(
+        module, batch_args=input_batches, func_name="my_func"
+    )
+\end{lstlisting}
+
+You should see score results spanning the range from the LO (0)
+up to the HI parameter value (1000) defined in \path{build_model.py}.
+
+\end{document}

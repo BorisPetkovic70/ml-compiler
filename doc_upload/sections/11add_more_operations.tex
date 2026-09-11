@@ -1,0 +1,124 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Add more operations}
+% -----------------------------
+As a next step, we will add \texttt{mul} and \texttt{sub} operations and corresponding lowering rules. To do that, first extend dialect:
+\begin{lstlisting} [language=Python, caption={Adding new operations in hc\_dialect.py}]
+@irdl_op_definition
+class HCMul(IRDLOperation):
+    name = "hc.mul"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
+
+@irdl_op_definition
+class HCSub(IRDLOperation):
+    name = "hc.sub"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
+\end{lstlisting}
+Also, register new operations:
+\begin{lstlisting} [language=Python, caption={Registering new operations in hc\_dialect.py}]
+HiCompiler = Dialect(
+    "hc",
+    (HCAdd, HCMul, HCSub),      # register operations here
+    (),  # attrs
+)
+\end{lstlisting}
+In the main file, import operations in order to use them:
+\begin{lstlisting} [language=Python, caption={Importing operations}]
+from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul
+\end{lstlisting}
+Modify \path{build_module} function, so that it contains \texttt{HCMul} and \texttt{HCSub}.
+\begin{lstlisting}[language=Python, caption={build context snippet}]
+c1 = arith.ConstantOp.from_int_and_width(1, 32)
+c2 = arith.ConstantOp.from_int_and_width(2, 32)
+c3 = arith.ConstantOp.from_int_and_width(3, 32)
+c4 = arith.ConstantOp.from_int_and_width(4, 32)
+
+hc_add = HCAdd(
+    operands=[c1.result, c2.result],
+    result_types=[i32],
+)
+hc_mul = HCMul(
+    operands=[hc_add.results[0], c3.result],
+    result_types=[i32],
+)
+hc_sub = HCSub(
+    operands=[hc_mul.results[0], c4.result],
+    result_types=[i32],
+)
+
+# Return the result
+ret = func.ReturnOp(hc_sub.results[0])
+
+# Block containing the constants + hc ops + return
+block = Block(ops=[c1, c2, c3, c4, hc_add, hc_mul, hc_sub, ret])
+...
+\end{lstlisting}
+Lastly, modify \path{match_and_rewrite} function:
+\begin{lstlisting}[language=Python, caption={build\_context snippet}]
+def match_and_rewrite(self, op: Operation, rewriter: PatternRewriter):
+    # Debug: uncomment if you want to see traversal
+    # print("VISIT:", op.name)
+
+    if op.name not in ("hc.add", "hc.mul", "hc.sub"):
+        return
+
+    # operations have two operands
+    lhs, rhs = op.operands
+    if op.name == "hc.add":
+        new_op = arith.AddiOp(lhs, rhs)
+    elif op.name == "hc.mul":
+        new_op = arith.MuliOp(lhs, rhs)
+    elif op.name == "hc.sub":
+        new_op = arith.SubiOp(lhs, rhs)
+    else:
+        raise Exception("Operation not supported")
+
+    rewriter.replace_op(
+        op,
+        new_ops=[new_op],
+        new_results=[new_op.result],
+        safe_erase=True,
+    )
+\end{lstlisting}
+
+\path{apply_lowering} and \texttt{main} functions remain the same. Run the script and you should see
+\texttt{hc.add}, \texttt{hc.mul} and \texttt{hc.sub} lowered to
+\texttt{arith.addi}, \texttt{arith.muli} and \texttt{arith.subi} respectively.
+
+Our \path{hc_dialect} is a front-end/high level IR. In the following example:
+
+\begin{lstlisting} [language=bash, caption={HC instruction example}]
+%2 = hc.add %0, %1 : i32
+\end{lstlisting}
+\begin{itemize}
+    \item We define how to add two values in \texttt{our} language.
+    \item Semantics are defined by us, not by the compiler infrastructure.
+    \item Compiler doesn't know how to optimize it or emit code for it.
+\end{itemize}
+After lowering \texttt{hc.add}  →  \texttt{arith.addi} we have:
+\begin{itemize}
+    \item Precise integer semantics
+    \item Defined overflow behavior
+    \item Standardized typing rules
+    \item Access to existing optimizations
+\end{itemize}
+
+\begin{lstlisting} [language=, caption={Typical pipeline}]
+hc.*        (our DSL)
+ ↓
+arith.*     (standard math)
+ ↓
+scf.*       (loops, control flow)
+ ↓
+llvm.*      (machine model)
+ ↓
+x86 / ARM   (real code)
+\end{lstlisting}
+
+\end{document}

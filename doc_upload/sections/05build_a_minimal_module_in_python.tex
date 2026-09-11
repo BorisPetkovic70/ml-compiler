@@ -1,0 +1,35 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+
+% -----------------------------
+\section{Build a minimal module in Python}
+% -----------------------------
+Now let’s build a completely empty builtin.module in Python, just to touch the IR construction APIs.
+Create \path{step2_empty_module.py}:
+\begin{lstlisting} [language=Python, caption={step2\_empty\_module.py}]
+from xdsl.context import Context
+from xdsl.dialects.builtin import Builtin, ModuleOp
+
+def main():
+    # Create context
+    ctx = Context()
+
+    # Load the builtin dialect into the context
+    ctx.load_dialect(Builtin)
+
+    # Create an empty module: builtin.module { }
+    module = ModuleOp(ops=[])
+
+    print("=== Empty module ===")
+    print(module)
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\begin{lstlisting} [language=bash, caption={Parse file}]
+python3 step2_empty_module.py
+\end{lstlisting}
+
+\end{document}

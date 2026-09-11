@@ -1,0 +1,25 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+
+\section{Prerequisites}
+
+Tutorial includes hands-on experience and practical exercises, having the following prerequisites
+will help you get the most out of it:
+\begin{itemize}
+  \item \textbf{Python proficiency} – You should be comfortable writing and reading Python code, including classes, functions, and basic data structures.
+  \item \textbf{Basic programming concepts} – Familiarity with concepts like control flow, data types, abstractions, and modular code design is expected.
+  \item \textbf{ML and AI basics} – Understanding of machine learning and AI concepts (such as models, tensors, and operations) will help you follow compiler examples and motivations.
+\end{itemize}
+
+Basic terminology:
+\begin{itemize}
+    \item \textbf{Dialect} – a namespace for operations and types (e.g. arith, scf, tensor, or your custom one).
+    \item \textbf{Op (Operation)} – node in the IR graph: has operands, results, attributes, regions.
+    \item \textbf{Type} – type of values (e.g. tensor, integer, float, etc.).
+    \item \textbf{Module} – container of operations (top-level program).
+    \item \textbf{Pass} – transformation or analysis that runs on modules/regions.
+    \item \textbf{Pattern rewrite} – local rule: match op(s) → rewrite to something else.
+\end{itemize}
+
+\end{document}

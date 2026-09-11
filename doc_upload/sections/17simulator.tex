@@ -1,0 +1,239 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Simulator}
+% -----------------------------
+A simulator is a component that models the behavior of a system by executing its operations, sometimes including
+hardware-level details such as memory, timing, or architectural constraints. In this tutorial, we will use an interpreter,
+which directly executes our IR operations to validate correctness without modeling low-level hardware behavior.
+
+Create 'simulator' folder next to your \path{hc_main.py} and \path{hc_dialect.py}:
+\begin{lstlisting} [language=bash, caption={Simulator folder structure}]
+simulator
+├── __init__.py
+├── interpreter.py
+\end{lstlisting}
+First add helper functions:
+\begin{lstlisting} [language=Python, caption={Helper functions}]
+from typing import Any
+from xdsl.ir import Operation, SSAValue
+from xdsl.dialects import func
+
+# -----------------------------
+# Helpers to read constants
+# -----------------------------
+
+def _int_from_attr(attr: Any) -> int | None:
+    """
+    Extract an int from common xdsl attribute shapes (IntegerAttr/IntAttr, etc.).
+    """
+    if attr is None:
+        return None
+
+    # Often: attr.value is IntAttr; or attr.data is int; or nested.
+    for k in ("data", "value"):
+        if hasattr(attr, k):
+            inner = getattr(attr, k)
+            # inner might again be an attr
+            for k2 in ("data", "value"):
+                if hasattr(inner, k2):
+                    try:
+                        return int(getattr(inner, k2))
+                    except Exception:
+                        pass
+            try:
+                return int(inner)
+            except Exception:
+                pass
+
+    try:
+        return int(attr)
+    except Exception:
+        return None
+
+
+def _const_value(op: Operation) -> int | None:
+    """
+    arith.constant -> python int
+    """
+    if op.name != "arith.constant":
+        return None
+    v = getattr(op, "value", None)
+    return _int_from_attr(v)
+\end{lstlisting}
+
+Create Interpreter class that will let us instantiate our interpreter:
+\begin{lstlisting} [language=Python, caption={Interpreter class}]
+# -----------------------------
+# Interpreter
+# -----------------------------
+
+class Interpreter:
+    def __init__(self):
+        # SSAValue is not always hashable across versions -> use id()
+        self.env: dict[int, int] = {}
+
+    def _get(self, v: SSAValue) -> int:
+        return self.env[id(v)]
+
+    def _set(self, v: SSAValue, value: int) -> None:
+        print(f"Set SSAValue: {v} = {int(value)}")
+        self.env[id(v)] = int(value)
+
+\end{lstlisting}
+Implement \path{run_block} method inside of this class. It deals with both, \path{arith} and \path{hc} instructions. 
+\begin{lstlisting} [language=Python, caption={run\_block method implementation}]
+def run_block(self, block) -> int:
+    """
+    Execute a single basic block (straight-line).
+    Returns the integer from func.return.
+    """
+    for op in list(block.ops):
+        name = op.name
+
+        # --- constants ---
+        if name == "arith.constant":
+            val = _const_value(op)
+            if val is None:
+                raise RuntimeError(f"Couldn't read constant value from op: {op}")
+            self._set(op.results[0], val)
+            continue
+
+        # --- high-level HC ops ---
+        if name == "hc.add":
+            a, b = op.operands
+            self._set(op.results[0], self._get(a) + self._get(b))
+            continue
+
+        if name == "hc.sub":
+            a, b = op.operands
+            self._set(op.results[0], self._get(a) - self._get(b))
+            continue
+
+        if name == "hc.mul":
+            a, b = op.operands
+            self._set(op.results[0], self._get(a) * self._get(b))
+            continue
+
+        if name == "hc.relu":
+            (x,) = op.operands
+            self._set(op.results[0], max(self._get(x), 0))
+            continue
+
+        # --- lowered arith ops (so you can run after lowering too) ---
+        if name == "arith.addi":
+            a, b = op.operands
+            self._set(op.results[0], self._get(a) + self._get(b))
+            continue
+
+        if name == "arith.subi":
+            a, b = op.operands
+            self._set(op.results[0], self._get(a) - self._get(b))
+            continue
+
+        if name == "arith.muli":
+            a, b = op.operands
+            self._set(op.results[0], self._get(a) * self._get(b))
+            continue
+
+        if name == "arith.maxsi":
+            a, b = op.operands
+            self._set(op.results[0], max(self._get(a), self._get(b)))
+            continue
+
+        # --- return ---
+        if name == "func.return":
+            if len(op.operands) != 1:
+                raise RuntimeError(f"Expected func.return with 1 operand, got: {op}")
+            return self._get(op.operands[0])
+
+        raise RuntimeError(f"Unsupported op in interpreter: {name}\nOp: {op}")
+
+    raise RuntimeError("Block ended without func.return")
+\end{lstlisting}
+This method executes a single basic block in a straight-line manner, meaning it processes operations sequentially
+without handling control flow such as branches or loops. It iterates through each operation in
+the block and dispatches behavior based on the operation’s name.
+
+For constants (arith.constant), it extracts the literal value and stores it in the
+interpreter’s internal environment. The interpreter maintains a mapping from SSA values
+to concrete integer values.
+
+For high-level operations (hc.add, hc.sub, hc.mul, hc.relu), it retrieves operand
+values, performs the corresponding
+Python arithmetic, and stores the computed result back into the environment.
+This directly implements the semantics of our high-level dialect.
+
+It also supports lowered arithmetic operations
+(
+\texttt{arith.addi},
+\texttt{arith.subi}, \texttt{arith.muli}, \texttt{arith.maxsi}),
+which allows the same interpreter to run code after lowering passes. This makes the interpreter
+useful both before and after middle-end transformations, reinforcing
+its role as a validation tool.
+
+Next, implement \path{run_module} that calls \path{run_block}:
+\begin{lstlisting} [language=Python, caption={run\_module method implementation}]
+def run_module(self, module, func_name: str = "my_func") -> int:
+    """
+    Find func.func @func_name and execute its first block.
+    """
+    # module.body.blocks[0].ops usually contains top-level ops
+    for top_block in module.body.blocks:
+        for op in list(top_block.ops):
+            if isinstance(op, func.FuncOp):
+                # Try to read the symbol name
+                sym = getattr(op, "sym_name", None)
+                name = None
+                if sym is not None:
+                    name = _int_from_attr(getattr(sym, "data", None))  # probably not int, ignore
+                    # better: sym.data is usually a string
+                    if hasattr(sym, "data"):
+                        name = sym.data
+                    else:
+                        name = str(sym)
+
+                if name == func_name or (name is None and func_name == "my_func"):
+                    # assume single-block body for now
+                    body_block = list(op.body.blocks)[0]
+                    return self.run_block(body_block)
+
+    raise RuntimeError(f"Function not found: {func_name}")
+\end{lstlisting}
+This method searches the given module for a function with the specified name
+and executes it using the interpreter. It iterates over all top-level blocks
+in the module and then over their operations, looking specifically for
+instances of func.FuncOp, which represent function definitions in the IR.
+
+For each function operation found, it attempts to extract the
+function’s symbolic name (\path{sym_name}). Since attributes in xDSL are
+often wrapped objects, the code carefully accesses sym.data
+(which typically holds the actual string name) and falls back to
+string conversion if necessary.
+
+Once the function name matches \path{func_name} (defaulting to \path{my_func}),
+the method assumes the function body contains a single block, retrieves that
+first block, and passes it to \path{self.run_block()} for execution.
+
+To use it in our \path{hc_main.py}:
+\begin{lstlisting} [language=bash, caption={Instantiating Interpreter}]
+from simulator.interpreter import Interpreter
+...
+def main():
+    # <Building module>
+    ...
+
+    hc_interpreter = Interpreter()
+    result_before = hc_interpreter.run_module(module, "my_func")
+    print("\nResult (interpreted, before lowering):", result_before)
+
+    # <Middle-end lowering part>
+    ...
+
+    lower_interpreter = Interpreter()
+    result_after = lower_interpreter.run_module(module, "my_func")
+    print("\nResult (interpreted, after lowering):", result_after)
+    \end{lstlisting}
+
+\end{document}

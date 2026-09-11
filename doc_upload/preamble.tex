@@ -1,0 +1,76 @@
+% -----------------------------
+% Encoding & language
+% -----------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+
+% -----------------------------
+% Layout
+% -----------------------------
+\usepackage{geometry}
+\geometry{
+  left=25mm,
+  right=25mm,
+  top=25mm,
+  bottom=30mm
+}
+
+\usepackage{setspace}
+\onehalfspacing
+
+% -----------------------------
+% Math & symbols
+% -----------------------------
+\usepackage{amsmath, amssymb}
+
+% -----------------------------
+% Images
+% -----------------------------
+\usepackage{graphicx}
+
+% -----------------------------
+% Code listings
+% -----------------------------
+\usepackage{listings}
+\usepackage{xcolor}
+
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\definecolor{keyword}{rgb}{0.1,0.1,0.7}
+\definecolor{comment}{rgb}{0.0,0.5,0.0}
+\definecolor{string}{rgb}{0.6,0.1,0.1}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{keyword}\bfseries,
+  commentstyle=\color{comment},
+  stringstyle=\color{string},
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=8pt,
+  frame=single,
+  breaklines=true,
+  tabsize=2,
+  showstringspaces=false,
+  captionpos=b
+}
+
+\lstset{escapeinside={(*@}{@*)}}
+
+\lstset{
+  literate=
+    {→}{{$\rightarrow$}}1
+    {←}{{$\leftarrow$}}1
+    {↑}{{$\uparrow$}}1
+    {↓}{{$\downarrow$}}1
+    {├}{{\texttt{|}}}1
+    {─}{{\texttt{-}}}1
+}
+
+% -----------------------------
+% Hyperlinks
+% -----------------------------
+\usepackage[hidelinks]{hyperref}

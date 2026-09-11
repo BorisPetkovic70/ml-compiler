@@ -1,0 +1,207 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Scf.for}
+% -----------------------------
+In \texttt{MLIR} (and similarly in \texttt{xDSL}), \texttt{SCF} stands for Structured Control Flow, a dialect designed to represent high-level control flow
+constructs such as loops and conditionals in a structured and analyzable form. Unlike low-level branch-based control flow,
+\texttt{SCF} operations explicitly model structured constructs like if and for, making transformations and optimizations easier to reason about.
+
+The scf.for operation represents a counted loop with a clear start value (lower bound), end value (upper bound),
+and step. It also supports loop-carried variables, allowing values to be passed from one iteration to the next
+in a well-defined \texttt{SSA} form. This makes scf.for particularly useful in ML compilers, where loops over tensor
+dimensions and iteration spaces are common and need to remain analyzable during optimization and lowering.
+
+We will implement a \texttt{pow} operation in our high-level dialect and then lower it into an scf.for loop
+to express exponentiation using structured iteration.
+Extend the HC dialect:
+\begin{lstlisting} [language=Python, caption={Pow operation definition}]
+@irdl_op_definition
+class HCPow(IRDLOperation):
+    name = "hc.pow"
+    base = operand_def(IntegerType)
+    exp  = operand_def(IntegerType)
+    res  = result_def(IntegerType)
+
+    def verify_(self):
+        if self.base.type != self.exp.type or self.res.type != self.base.type:
+            raise ValueError("hc.pow: base, exp, and res must have same integer type")
+\end{lstlisting}
+and register it:
+\begin{lstlisting} [language=Python, caption={Registering HCPow}]
+    (HCAdd, HCMul, HCSub, HCRelu, HCPow),      # register operations here
+\end{lstlisting}
+In \path{hc_lowering.py}, provide additional imports for \texttt{builtin}, \texttt{scf},
+\texttt{Block} and \texttt{Region}. 
+\begin{lstlisting} [language=Python, caption={Imports for lowering}]
+from xdsl.dialects import arith, builtin, scf
+from xdsl.ir import Block, Operation, Region
+\end{lstlisting}
+Extend the list of supported operations:
+\begin{lstlisting} [language=Python, caption={Supported operations}]
+if op.name not in ("hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow"):
+    return
+\end{lstlisting}
+and provide lowering logic:
+\begin{lstlisting} [language=Python, caption={hc.pow lowering}]
+# ---------------- hc.pow ----------------
+if op.name == "hc.pow":
+    base, exp = op.operands
+    ty = op.results[0].type  # integer type
+
+    # constants for loop bounds/step
+    c0 = arith.ConstantOp.from_int_and_width(0, 32)
+    c1 = arith.ConstantOp.from_int_and_width(1, 32)
+
+    # init accumulator = 1
+    init = arith.ConstantOp.from_int_and_width(1, 32)
+
+    # scf.for (%i = 0; %i < exp; %i += 1) iter_args(%acc = init) -> (ty) { %acc2 = muli %acc, base; scf.yield %acc2 }
+    body = Block(arg_types=[ty, ty])
+
+    # Better: use index for iv and keep acc as ty.
+    # Let's construct it robustly:
+    iv_ty = builtin.IndexType()
+    body = Block(arg_types=[iv_ty, ty])
+    iv, acc = body.args
+
+    mul = arith.MuliOp(acc, base)
+    body.add_ops([mul, scf.YieldOp(mul.result)])
+
+    loop = scf.ForOp(
+        lb=c0.result,          # lower bound
+        ub=exp,                # upper bound (dynamic)
+        step=c1.result,        # step
+        iter_args=[init.result],
+        body=Region(body),
+    )
+
+    # scf.ForOp returns the iter_args results
+    rewriter.replace_op(
+        op,
+        new_ops=[c0, c1, init, loop],
+        new_results=[loop.results[0]],
+        safe_erase=True,
+    )
+    return
+\end{lstlisting}
+Try it in our \path{hc_main.py}:
+\begin{lstlisting} [language=Python, caption={}]
+from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow
+...
+# Operand must be SSA value
+c5 = arith.ConstantOp.from_int_and_width(3, 32)
+hc_pow = HCPow(
+    operands=[c2, c4], # Base and exponent
+    result_types=[i32],
+)
+# Return the result
+ret = func.ReturnOp(hc_pow.results[0])
+
+# Block containing the constants + hc ops + return
+block = Block(ops=[c1, c2, c3, c4, c5, hc_add, hc_mul, hc_sub, hc_relu, hc_pow, ret])
+\end{lstlisting}
+
+Lowered function should look something like (notice scf.for region-based operation):
+\begin{lstlisting} [language=Python, caption={Lowered example}]
+builtin.module {
+  func.func @my_func() -> i32 {
+    ...
+    %10 = arith.constant 0 : i32
+    %11 = arith.constant 1 : i32
+    %12 = arith.constant 1 : i32
+    %13 = scf.for %14 = %10 to %2 step %11 iter_args(%15 = %12) -> (i32) {
+      %16 = arith.muli %15, %2 : i32
+      scf.yield %16 : i32
+    }
+    func.return %13 : i32
+  }
+}
+\end{lstlisting}
+To support \texttt{pow} operation in the simulator, we need to extend \path{interpreter.py}:
+\begin{lstlisting} [language=Python, caption={Extending interpreter with pow operation}]
+from xdsl.ir import BlockArgument, Operation, SSAValue
+...
+            if name == "hc.pow":
+                a, b = op.operands
+                self._set(op.results[0], self._get(a) ** self._get(b))
+                continue
+...
+            if name == "scf.for":
+                # Try: recognize "pow lowering" pattern and shortcut it.
+                if self._try_eval_pow_lowering(op):
+                    continue
+                raise RuntimeError("Unsupported scf.for (not recognized as pow lowering)")
+\end{lstlisting}
+And provide helper function used for \texttt{pow} pattern evaluation:
+\begin{lstlisting} [language=Python, caption={Pow lowering recognition}]
+    def _try_eval_pow_lowering(self, op) -> bool:
+        """
+        Recognize and evaluate the specific lowering:
+          %res = scf.for %iv = %lb to %ub step %step iter_args(%acc = %init) -> (i32) {
+            %m = arith.muli %acc, %base : i32
+            scf.yield %m : i32
+          }
+        If matched: set scf.for result(s) and return True, else False.
+        """
+        # Must have exactly 1 iter_arg result
+        if len(op.results) != 1:
+            return False
+
+        # Must have lb, ub, step at least
+        if len(op.operands) < 4:
+            return False
+
+        lb = self._get(op.operands[0])
+        ub = self._get(op.operands[1])
+        step = self._get(op.operands[2])
+        init = self._get(op.operands[3])  # first iter_arg init
+
+        # Typical pow lowering: lb=0, step=1, ub>=0
+        if lb != 0 or step != 1 or ub < 0:
+            return False
+
+        # Body: single block
+        try:
+            body_block = op.regions[0].blocks[0]
+        except Exception:
+            return False
+
+        ops = list(body_block.ops)
+        # Expect exactly: [arith.muli, scf.yield]
+        if len(ops) != 2:
+            return False
+
+        mul, yld = ops
+        if mul.name != "arith.muli" or yld.name != "scf.yield":
+            return False
+
+        # scf.yield must yield the mul result
+        if len(yld.operands) != 1 or yld.operands[0] is not mul.results[0]:
+            return False
+
+        # mul operands should be: (iter_arg_block_arg, base_value)
+        # We don't want to fully interpret block args; just identify the "base" operand:
+        if len(mul.operands) != 2:
+            return False
+
+        a, b = mul.operands
+
+        # In xDSL, block args are typically instances of BlockArgument.
+        if isinstance(a, BlockArgument) and not isinstance(b, BlockArgument):
+            base_val = self._get(b)
+        elif isinstance(b, BlockArgument) and not isinstance(a, BlockArgument):
+            base_val = self._get(a)
+        else:
+            # Either both are block args or both are not -> not the simple pow pattern
+            return False
+
+        # Evaluate
+        result = init * (base_val ** ub)
+
+        self._set(op.results[0], result)
+        return True
+\end{lstlisting}
+
+\end{document}

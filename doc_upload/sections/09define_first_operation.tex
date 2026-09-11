@@ -1,0 +1,110 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Define first operation}
+% -----------------------------
+For easier maintenance, we will split dialect into a separate file and extend it with new operation.
+Create \path{hc_dialect.py} file:
+\begin{lstlisting} [language=Python, caption={Define and register add operation}]
+from xdsl.ir import Dialect
+from xdsl.irdl import (
+    IRDLOperation,
+    irdl_op_definition,
+    operand_def,
+    result_def,
+)
+from xdsl.dialects.builtin import IntegerType
+
+# -----------------------------
+# Operation: hc.add
+# -----------------------------
+@irdl_op_definition
+class HCAdd(IRDLOperation):
+    name = "hc.add"
+
+    # Two i32 operands
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+
+    # One i32 result
+    res = result_def(IntegerType)
+
+# -----------------------------
+# Dialect: HiCompiler
+# -----------------------------
+HiCompiler = Dialect(
+    "hc",
+    (HCAdd,),      # register operations here
+    (),  # attrs
+)
+\end{lstlisting}
+Use newly created operation in the module:
+
+\begin{lstlisting} [language=Python, caption={Build module with add operation}]
+from xdsl.context import Context
+from xdsl.ir import Region, Block
+from xdsl.dialects.builtin import Builtin, ModuleOp, i32
+from xdsl.dialects import func, arith
+
+from hc_dialect import HiCompiler, HCAdd
+
+
+def build_context() -> Context:
+    ctx = Context()
+    ctx.load_dialect(Builtin)
+    ctx.load_dialect(func.Func)
+    ctx.load_dialect(arith.Arith)
+    ctx.load_dialect(HiCompiler)   # <-- our custom dialect
+    return ctx
+
+
+def build_module(ctx: Context) -> ModuleOp:
+    # Constants: 1 and 2
+    c1 = arith.ConstantOp.from_int_and_width(1, 32)
+    c2 = arith.ConstantOp.from_int_and_width(2, 32)
+
+    # Our custom operation: %2 = hc.add %0, %1 : i32
+    hc_add = HCAdd(
+        operands=[c1.result, c2.result],
+        result_types=[i32],
+    )
+
+    # Return the result
+    ret = func.ReturnOp(hc_add.results[0])
+
+    # Block containing the constants + hc_add + return
+    block = Block(ops=[c1, c2, hc_add, ret])
+
+    # Function returning i32
+    fn = func.FuncOp("my_func", ([], [i32]))
+    fn.body = Region(block)
+
+    # Module
+    module = ModuleOp(ops=[fn])
+    return module
+
+
+def main():
+    ctx = build_context()
+    module = build_module(ctx)
+    print(module)
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+You should see something like:
+\begin{lstlisting} [language=bash, caption={IR with hc.add operation}]
+builtin.module {
+  func.func @my_func() -> i32 {
+    %0 = arith.constant 1 : i32
+    %1 = arith.constant 2 : i32
+    %2 = "hc.add"(%0, %1) : (i32, i32) -> i32
+    func.return %2 : i32
+  }
+}
+\end{lstlisting}
+We have a fully functioning custom MLIR dialect and operation in xDSL.
+
+\end{document}

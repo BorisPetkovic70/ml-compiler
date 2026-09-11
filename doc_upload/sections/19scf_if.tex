@@ -1,0 +1,151 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Scf.if}
+% -----------------------------
+
+\texttt{scf.if} is a structured control-flow operation used to
+express conditional execution in \texttt{MLIR/xDSL}. It evaluates a boolean
+condition and executes either the then region or the else region, optionally
+returning values from the chosen branch.
+
+Using this mechanism, we can implement a max operation by comparing two values
+and selecting the larger one: if the first value is greater than the second,
+the then branch returns the first operand,
+otherwise the else branch returns the second.
+
+First, extend dialect:
+\begin{lstlisting} [language=Python, caption={Adding max to hc\_dialect.py}]
+@irdl_op_definition
+class HCMax(IRDLOperation):
+    name = "hc.max"
+    lhs = operand_def(IntegerType)
+    rhs = operand_def(IntegerType)
+    res = result_def(IntegerType)
+
+    def verify_(self):
+        if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
+            raise ValueError("hc.max: operands and result must have the same integer type")
+...
+    (HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax),      # register operations here
+\end{lstlisting}
+
+Implement lowering:
+\begin{lstlisting} [language=Python, caption={HCMax lowering}]
+if op.name not in (
+    "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max"
+):
+    return
+...
+# ---------------- hc.max ----------------
+if op.name == "hc.max":
+    lhs, rhs = op.operands
+    ty = op.results[0].type
+
+    cmp = arith.CmpiOp(lhs, rhs, "sgt")  # signed greater-than
+
+    then_block = Block(arg_types=[])
+    then_block.add_ops([scf.YieldOp(lhs)])
+
+    else_block = Block(arg_types=[])
+    else_block.add_ops([scf.YieldOp(rhs)])
+
+    if_op = scf.IfOp(
+        cmp.result,
+        [ty],
+        Region(then_block),
+        Region(else_block),
+    )
+
+    rewriter.replace_op(
+        op,
+        new_ops=[cmp, if_op],
+        new_results=[if_op.results[0]],
+        safe_erase=True,
+    )
+    return
+
+\end{lstlisting}
+Extend the interpreter with simple implementation, that just recognizes \texttt{if} pattern.
+Since lowered Max operation contains arith.cmpi, we have to address that in our interpreter, as well:
+\begin{lstlisting} [language=Python, caption={Interpreting operation}]
+if name == "hc.max":
+    a, b = op.operands
+    self._set(op.results[0], max(self._get(a), self._get(b)))
+    continue
+...
+if name == "arith.cmpi":
+    a, b = op.operands
+    lhs = self._get(a)
+    rhs = self._get(b)
+
+    # In xDSL: sgt == 4
+    pred = op.predicate.value.data
+
+    if pred != 4:
+        raise RuntimeError(f"Only sgt supported in interpreter, got predicate: {pred}\nOp: {op}")
+
+    # signed greater-than
+    result = 1 if lhs > rhs else 0
+
+    self._set(op.results[0], result)
+    continue
+...
+if name == "scf.if":
+    # Treat non-zero as True
+    cond = self._get(op.operands[0]) != 0
+
+    then_region = op.regions[0]
+    else_region = op.regions[1] if len(op.regions) > 1 else None
+
+    if cond:
+        yielded = self._eval_scf_if_region_yield(then_region)
+    else:
+        if else_region is None:
+            raise RuntimeError("scf.if has no else region but condition is false")
+        yielded = self._eval_scf_if_region_yield(else_region)
+
+    # Assume scf.if returns exactly one value
+    self._set(op.results[0], yielded)
+    continue
+...
+# Helper method
+def _eval_scf_if_region_yield(self, region) -> int:
+    """
+    Simplified: Assume region has 1 block and the last op is scf.yield with 1 operand.
+    We ignore everything else in the region and just read the yielded SSA value.
+    """
+    block = list(region.blocks)[0]
+    last = list(block.ops)[-1]
+    if last.name != "scf.yield" or len(last.operands) != 1:
+        raise RuntimeError(f"Expected region to end with scf.yield(1), got: {last}")
+    return self._get(last.operands[0])
+\end{lstlisting}
+Use newly created HCMax in our \path{hc_main.py} and try different values.
+
+As an excercise, extend dialect with HCMin operation (hint: use \texttt{slg} for signed less-than operation).
+To be able to interpret new operation, you will need to adjust \texttt{arith.cmpi} section in \texttt{interpreter.py}:
+
+\begin{lstlisting} [language=Python, caption={Extending arith.cmpi interpretation}]
+if name == "arith.cmpi":
+    a, b = op.operands
+    lhs = self._get(a)
+    rhs = self._get(b)
+
+    pred = op.predicate.value.data
+
+    # In xDSL: sgt == 4; lgt == 2
+    if pred == 4:  # signed greater-than
+        result = 1 if lhs > rhs else 0
+    elif pred == 2:  # signed less-than
+        result = 1 if lhs < rhs else 0
+    else:
+        raise RuntimeError(
+            f"Only sgt and slt supported in interpreter, got predicate: {pred}\nOp: {op}"
+        )
+    self._set(op.results[0], result)
+    continue
+\end{lstlisting}
+
+\end{document}

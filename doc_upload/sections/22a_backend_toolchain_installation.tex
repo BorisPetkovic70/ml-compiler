@@ -1,0 +1,49 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{llvm-project installation}
+% -----------------------------
+
+Install dependencies:
+
+\begin{lstlisting} [language=bash, caption={Dependencies installation}]
+sudo apt update
+sudo apt install -y \
+  git cmake ninja-build \
+  clang lld \
+  build-essential \
+  python3 python3-pip \
+  libtinfo-dev zlib1g-dev
+\end{lstlisting}
+Clone llvm-project:
+\begin{lstlisting} [language=bash, caption={Dependencies installation}]
+git clone https://github.com/llvm/llvm-project.git
+cd llvm-project
+\end{lstlisting}
+Create a build folder inside of it:
+\begin{lstlisting} [language=bash, caption={Creating build directory}]
+mkdir build
+cd build
+\end{lstlisting}
+Configure with CMake and Ninja generator:
+\begin{lstlisting} [language=bash, caption={Configuring with CMake}]
+cmake -G Ninja ../llvm \
+-DLLVM_ENABLE_PROJECTS="clang;mlir;lld" \
+-DCMAKE_BUILD_TYPE=Release \
+-DLLVM_ENABLE_ASSERTIONS=ON
+\end{lstlisting}
+Build everything:
+\begin{lstlisting} [language=bash, caption={Building repository}]
+ninja -j 2
+\end{lstlisting}
+Verify tools:
+\begin{lstlisting} [language=bash, caption={Tools verification}]
+mlir-opt --version
+mlir-translate --version
+llc --version
+clang --version
+\end{lstlisting}
+
+
+\end{document}

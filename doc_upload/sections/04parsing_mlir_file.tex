@@ -1,0 +1,52 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+
+% -----------------------------
+\section{Parsing mlir file}
+% -----------------------------
+Now let's parse and print created mlir file from Python:
+Create a file \path{step1_parse_and_print.py}
+
+\begin{lstlisting}[language=Python, caption={step1\_parse\_and\_print.py}]
+from xdsl.context import Context
+from xdsl.parser import Parser
+from xdsl.dialects.builtin import Builtin
+from xdsl.dialects.func import Func
+from xdsl.dialects.arith import Arith
+
+def main() -> None:
+    # Create context and load dialects you need
+    ctx = Context()
+    ctx.load_dialect(Builtin)
+    ctx.load_dialect(Func)
+    ctx.load_dialect(Arith)
+
+    # Read MLIR/xDSL file
+    with open("test.mlir", "r") as f:
+        text = f.read()
+
+    # Parse into a module
+    parser = Parser(ctx, text)
+    module = parser.parse_module()
+
+    # Print the module back out
+    print("=== Parsed module ===")
+    print(module)
+
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\begin{lstlisting} [language=bash, caption={Parse file}]
+python3 step1_parse_and_print.py
+\end{lstlisting}
+
+\textbf{Exercises}
+\begin{itemize}
+    \item Create a mlir file for \path{mul_two} function (Hint: use arith.muli)
+    \item Create a mlir file for \path{sub_two} function (Hint: use arith.subi)
+    \item Create a mlir file for linear function \path{ax + b} (3 arguments)
+\end{itemize}
+\end{document}

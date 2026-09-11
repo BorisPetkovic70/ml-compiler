@@ -1,0 +1,141 @@
+\documentclass[../main.tex]{subfiles}
+
+\begin{document}
+% -----------------------------
+\section{Dead code elimination}
+% -----------------------------
+Next, will add a tiny DCE pass that removes ops whose results have no use.
+Focus here is to erase ops that:
+\begin{itemize}
+    \item are not terminators (e.g., not func.return)
+    \item have results
+    \item all results have zero uses
+    \item op is in a “safe-to-drop” set 
+\end{itemize}
+We will run this in a loop until no more ops can be removed.
+In most xDSL versions, the safe sequence is:
+\begin{itemize}
+    \item op.detach() (removes it from its block / unlinks)
+    \item then op.erase() (frees it, asserts parent is None)
+\end{itemize}
+
+First, we will create some helper functions. Start with the function that returns how many times an SSA value is used in the IR.
+\begin{lstlisting} [language=Python, caption={Counting uses}]
+# -------------------------------------
+# Dead code elimination
+# -------------------------------------
+def _num_uses(v: SSAValue) -> int:
+    uses = getattr(v, "uses", None)
+    if uses is None:
+        return 0
+    try:
+        return len(uses)
+    except TypeError:
+        # Sometimes uses is an iterator/generator-like
+        return sum(1 for _ in uses)
+\end{lstlisting}
+In xDSL (like in MLIR), every SSAValue keeps track of its uses — i.e. which operations consume that value as an operand.
+Next, check conditions for the simple dce case:
+\begin{lstlisting} [language=Python, caption={Checking if it is trivial to do dce}]
+def _is_trivially_dceable(op: Operation) -> bool:
+    """
+    Conservative: only remove arith ops (constants and arithmetic) that have
+    no users. Not covering memref/loads/stores/calls etc. for now.
+    """
+    if op.name == "func.return":
+        return False
+
+    # Only drop ops from these dialects for now
+    if op.name.startswith("arith."):
+        return True
+
+    # If we also want to also drop leftover hc.* after lowering, we could include:
+    # if op.name.startswith("hc."):
+    #     return True
+
+    return False
+\end{lstlisting}
+Implement a function that performs one pass of Dead Code Elimination (DCE) over a single Block in xDSL:
+\begin{lstlisting} [language=Python, caption={One DCE pass implementation}]
+def dce_block(block: Block) -> bool:
+    """
+    One pass of DCE over a block.
+    Returns True if anything was erased.
+    """
+    changed = False
+
+    # Iterate backwards: safer when erasing
+    for op in list(block.ops)[::-1]:
+        # Must be safe to erase
+        if not _is_trivially_dceable(op):
+            continue
+
+        # If op has no results, keep it (could be side-effecting; conservative)
+        if len(op.results) == 0:
+            continue
+
+        # If any result is used, keep it
+        if any(_num_uses(res) > 0 for res in op.results):
+            continue
+
+        # Otherwise erase
+        _erase_op(op)
+        changed = True
+
+    return changed
+\end{lstlisting}
+Notice that by iterating backwards, we eliminate leaf nodes first.
+\\Implement a function that runs Dead Code Elimination (DCE) repeatedly over all
+function bodies in a module until nothing more can be removed.
+\begin{lstlisting} [language=Python, caption={Applying DCE}]
+def apply_dce(module) -> None:
+    """
+    Repeatedly run DCE on all function body blocks until fixpoint.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for top_block in module.body.blocks:
+            for op in list(top_block.ops):
+                if isinstance(op, func.FuncOp):
+                    for body_block in op.body.blocks:
+                        if dce_block(body_block):
+                            changed = True
+\end{lstlisting}
+Let’s break it down:
+\begin{itemize}
+    \item It walks through all functions in the module
+    \item Runs \path{dce_block()} on every block inside each function
+    \item If anything was removed → run everything again
+    \item Stops only when no more dead code can be eliminated
+\end{itemize}
+Lastly, implement a helper function that first removes operation from its parent block,
+and then erases it.
+\begin{lstlisting} [language=Python, caption={Erasing operation}]
+def _erase_op(op: Operation) -> None:
+    # Detach from parent block first (required in our xdsl)
+    if hasattr(op, "detach"):
+        op.detach()
+    else:
+        raise RuntimeError("Operation.detach() not found; cannot safely DCE ops.")
+    op.erase()
+\end{lstlisting}
+Now, use it in the main function:
+\begin{lstlisting} [language=Python, caption={Adding DCE in the main body}]
+    ...
+    apply_dce(module)
+    print("\n=== AFTER DCE ===")
+    print(module)
+\end{lstlisting}
+In the DCE section, you should only see one constants, others have been removed:
+\begin{lstlisting} [language=bash, caption={DCE output}]
+=== AFTER DCE ===
+builtin.module {
+  func.func @my_func() -> i32 {
+    %0 = arith.constant 0 : i32
+    func.return %0 : i32
+  }
+}
+\end{lstlisting}
+
+\end{document}
