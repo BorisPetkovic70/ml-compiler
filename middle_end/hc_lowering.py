@@ -1,5 +1,5 @@
 from xdsl.dialects import arith, builtin, scf
-from xdsl.ir import Block, Operation, Region
+from xdsl.ir import Block, Operation, OpResult, Region
 from xdsl.pattern_rewriter import (
     RewritePattern,
     PatternRewriter
@@ -7,6 +7,66 @@ from xdsl.pattern_rewriter import (
 
 def _const_i32(value: int) -> arith.ConstantOp:
     return arith.ConstantOp.from_int_and_width(value, 32)
+
+
+# -----------------------------------------------------------------------------
+#  Vector lowering helpers (ported from step13_vec_operators.py)
+# -----------------------------------------------------------------------------
+def _as_int(x) -> int:
+    """Convert xDSL int-like objects (IntAttr, nested attrs) to a python int."""
+    if isinstance(x, int):
+        return x
+    if hasattr(x, "data"):
+        return int(x.data)
+    if hasattr(x, "value") and hasattr(x.value, "data"):
+        return int(x.value.data)
+    return int(x)
+
+
+def _vec_num_elements(vec_type: builtin.VectorType) -> int:
+    """Total number of elements in a vector type (product of its shape dims)."""
+    shape = getattr(vec_type, "shape", None)
+    if shape is None:
+        raise RuntimeError(f"Vector type has no 'shape' attribute: {vec_type}")
+    n = 1
+    for d in shape:
+        n *= _as_int(d)
+    return n
+
+
+def _const_zero_like(like_type) -> arith.ConstantOp:
+    """Create a constant 0 with the same type as `like_type` (scalar or vector)."""
+    if isinstance(like_type, builtin.VectorType):
+        count = _vec_num_elements(like_type)
+        dense = builtin.DenseIntOrFPElementsAttr.from_list(like_type, [0] * count)
+        return arith.ConstantOp(dense)
+    # scalar integer fallback
+    return _const_i32(0)
+
+
+def _const_splat_like(scalar_const_op: arith.ConstantOp, like_vec_type) -> arith.ConstantOp:
+    """Build a vector constant of `like_vec_type` filled with the scalar constant's value."""
+    cval_attr = getattr(scalar_const_op, "value", None)
+    if cval_attr is None:
+        raise RuntimeError("Cannot read scalar constant value; expected ConstantOp.value attribute.")
+
+    if hasattr(cval_attr, "value") and hasattr(cval_attr.value, "data"):
+        scalar_int = int(cval_attr.value.data)
+    elif hasattr(cval_attr, "data"):
+        scalar_int = int(cval_attr.data)
+    else:
+        scalar_int = int(cval_attr)
+
+    count = _vec_num_elements(like_vec_type)
+    dense = builtin.DenseIntOrFPElementsAttr.from_list(like_vec_type, [scalar_int] * count)
+    return arith.ConstantOp(dense)
+
+
+def _defining_op(val) -> Operation | None:
+    """Defining op of an SSA value (robust across xdsl versions; cf. constant_folding fix)."""
+    if isinstance(val, OpResult):
+        return val.op
+    return None
 
 # -----------------------------------------------------------------------------
 #  Lowering pattern: hc -> arith
@@ -17,7 +77,8 @@ class LowerHCPattern(RewritePattern):
         # print("VISIT:", op.name)
 
         if op.name not in (
-            "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min"
+            "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
+            "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.relu_vec",
         ):
             return
 
@@ -168,6 +229,76 @@ class LowerHCPattern(RewritePattern):
                 safe_erase=True,
             )
             return
+
+        # ==========================================================
+        #  Vector operations
+        #  arith.* ops operate element-wise on vectors when the
+        #  operand/result types match.
+        # ==========================================================
+
+        # ---------------- hc.add_vec ----------------
+        if op.name == "hc.add_vec":
+            lhs, rhs = op.operands
+            new_op = arith.AddiOp(lhs, rhs)
+            rewriter.replace_op(
+                op,
+                new_ops=[new_op],
+                new_results=[new_op.result],
+                safe_erase=True,
+            )
+            return
+
+        # ---------------- hc.sub_vec ----------------
+        if op.name == "hc.sub_vec":
+            lhs, rhs = op.operands
+            new_op = arith.SubiOp(lhs, rhs)
+            rewriter.replace_op(
+                op,
+                new_ops=[new_op],
+                new_results=[new_op.result],
+                safe_erase=True,
+            )
+            return
+
+        # ---------------- hc.mul_vec (scalar * vector -> vector) ----------------
+        if op.name == "hc.mul_vec":
+            scalar, vec = op.operands
+
+            # arith.muli needs matching types, so splat the scalar to a vector of
+            # vec's type. This currently requires the scalar to be an arith.constant.
+            scalar_op = _defining_op(scalar)
+            if scalar_op is None or scalar_op.name != "arith.constant":
+                raise RuntimeError(
+                    "hc.mul_vec lowering currently expects the scalar operand "
+                    "to be an arith.constant"
+                )
+
+            splat = _const_splat_like(scalar_op, vec.type)
+            mul = arith.MuliOp(vec, splat.result)
+            rewriter.replace_op(
+                op,
+                new_ops=[splat, mul],
+                new_results=[mul.result],
+                safe_erase=True,
+            )
+            return
+
+        # ---------------- hc.relu_vec ----------------
+        if op.name == "hc.relu_vec":
+            x = op.operands[0]
+            c0 = _const_zero_like(x.type)  # dense-zero vector of x's type
+
+            if hasattr(arith, "MaxSIOp"):
+                maxop = arith.MaxSIOp(x, c0.result)
+                rewriter.replace_op(
+                    op,
+                    new_ops=[c0, maxop],
+                    new_results=[maxop.result],
+                    safe_erase=True,
+                )
+                return
+            else:
+                raise RuntimeError("Cannot lower hc.relu_vec: arith.MaxSIOp needed.")
 
 
 
