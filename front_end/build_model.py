@@ -75,5 +75,53 @@ def build_score_model(path: str = MODEL_PATH):
     print(f"Saved ONNX model to: {path}")
 
 
+VEC_AFFINE_RELU_MODEL_PATH = "vec_affine_relu.onnx"
+
+def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int = 4):
+    """Build a simple 3-node vector model: y = relu(a * x + b), shape [n].
+
+    All tensors are vector-shaped [n]; no broadcasting involved.
+    """
+    # ------------------------------------------------------------
+    # Inputs / Output  (all vector-shaped: [n])
+    # ------------------------------------------------------------
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [n])
+    a = helper.make_tensor_value_info("a", TensorProto.FLOAT, [n])
+    b = helper.make_tensor_value_info("b", TensorProto.FLOAT, [n])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [n])
+
+    # ------------------------------------------------------------
+    # Graph nodes (3 total)
+    # ------------------------------------------------------------
+    nodes = [
+        # s = a * x
+        helper.make_node("Mul", ["a", "x"], ["s"], name="mul_ax"),
+
+        # t = s + b
+        helper.make_node("Add", ["s", "b"], ["t"], name="add_b"),
+
+        # y = relu(t)
+        helper.make_node("Relu", ["t"], ["y"], name="relu"),
+    ]
+
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="VecAffineReluGraph",
+        inputs=[x, a, b],
+        outputs=[y],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 13)],
+        producer_name="vec_affine_relu_builder",
+    )
+
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"Saved ONNX model to: {path}")
+
+
 if __name__ == "__main__":
-    build_score_model()
+    #build_score_model()
+    build_vec_affine_relu_model()
