@@ -1,5 +1,5 @@
 from xdsl.dialects import arith
-from xdsl.ir import Operation, SSAValue
+from xdsl.ir import Operation, OpResult, SSAValue
 from xdsl.pattern_rewriter import (
     RewritePattern,
     PatternRewriter
@@ -46,8 +46,9 @@ class FoldArithInts(RewritePattern):
 # -----------------------------------------------------------------------------
 
 def _defining_op(val: SSAValue) -> Operation | None:
-    # SSAValue in xdsl typically has .owner (def op)
-    return getattr(val, "owner", None)
+    if isinstance(val, OpResult):
+        return val.op
+    return None
 
 def _get_const_int_binop_args(op: Operation):
     """Return (a, b) if both operands are integer constants, else None."""
@@ -67,11 +68,14 @@ def _get_const_int_binop_args(op: Operation):
 
     return a, b
 
-def _int_from_constant_op(op: Operation) -> int | None:
+def _int_from_constant_op(op: Operation | None) -> int | None:
     """
     Extract integer from arith.constant.
     Returns None if not an integer constant we can read.
     """
+    if op is None:
+        return None
+
     if op.name != "arith.constant":
         return None
 
