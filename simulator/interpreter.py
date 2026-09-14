@@ -43,6 +43,33 @@ def _const_value(op: Operation) -> int | None:
         return None
     v = getattr(op, "value", None)
     return _int_from_attr(v)
+
+
+def _dense_values(op: Operation) -> list[int] | None:
+    """
+    arith.constant dense<...> : vector<Nxi32> -> list[int], else None.
+    """
+    if op.name != "arith.constant":
+        return None
+    v = getattr(op, "value", None)
+    if v is None or not hasattr(v, "get_values"):
+        return None
+    try:
+        return list(v.get_values())
+    except Exception:
+        return None
+
+
+def _elt_binop(a, b, f):
+    """Apply f element-wise, broadcasting a scalar against a vector (list)."""
+    if isinstance(a, list) and isinstance(b, list):
+        return [f(x, y) for x, y in zip(a, b)]
+    if isinstance(a, list):
+        return [f(x, b) for x in a]
+    if isinstance(b, list):
+        return [f(a, y) for y in b]
+    return f(a, b)
+
 # -----------------------------
 # Interpreter
 # -----------------------------
@@ -50,14 +77,14 @@ def _const_value(op: Operation) -> int | None:
 class Interpreter:
     def __init__(self):
         # SSAValue is not always hashable across versions -> use id()
-        self.env: dict[int, int] = {}
+        self.env: dict[int, object] = {}
 
-    def _get(self, v: SSAValue) -> int:
+    def _get(self, v: SSAValue):
         return self.env[id(v)]
 
-    def _set(self, v: SSAValue, value: int) -> None:
-        # print(f"Set SSAValue: {v} = {int(value)}")
-        self.env[id(v)] = int(value)
+    def _set(self, v: SSAValue, value) -> None:
+        # print(f"Set SSAValue: {v} = {value}")
+        self.env[id(v)] = value
 
     def run_block(self, block) -> int:
         """
@@ -69,31 +96,35 @@ class Interpreter:
 
             # --- constants ---
             if name == "arith.constant":
+                dense = _dense_values(op)
+                if dense is not None:
+                    self._set(op.results[0], dense)
+                    continue
                 val = _const_value(op)
                 if val is None:
                     raise RuntimeError(f"Couldn't read constant value from op: {op}")
                 self._set(op.results[0], val)
                 continue
 
-            # --- high-level HC ops ---
-            if name == "hc.add":
+            # --- high-level HC ops (scalar and vector variants share semantics) ---
+            if name in ("hc.add", "hc.add_vec"):
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) + self._get(b))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p + q))
                 continue
 
-            if name == "hc.sub":
+            if name in ("hc.sub", "hc.sub_vec"):
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) - self._get(b))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p - q))
                 continue
 
-            if name == "hc.mul":
+            if name in ("hc.mul", "hc.mul_vec", "hc.mul_vec_vec"):
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) * self._get(b))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p * q))
                 continue
 
-            if name == "hc.relu":
+            if name in ("hc.relu", "hc.relu_vec"):
                 (x,) = op.operands
-                self._set(op.results[0], max(self._get(x), 0))
+                self._set(op.results[0], _elt_binop(self._get(x), 0, max))
                 continue
 
             if name == "hc.pow":
@@ -114,22 +145,22 @@ class Interpreter:
             # --- lowered arith ops (so you can run after lowering too) ---
             if name == "arith.addi":
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) + self._get(b))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p + q))
                 continue
 
             if name == "arith.subi":
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) - self._get(b))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p - q))
                 continue
 
             if name == "arith.muli":
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) * self._get(b))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p * q))
                 continue
 
             if name == "arith.maxsi":
                 a, b = op.operands
-                self._set(op.results[0], max(self._get(a), self._get(b)))
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), max))
                 continue
 
             if name == "arith.cmpi":
