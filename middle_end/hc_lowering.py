@@ -78,7 +78,7 @@ class LowerHCPattern(RewritePattern):
 
         if op.name not in (
             "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
-            "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.relu_vec",
+            "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.mul_vec_vec", "hc.relu_vec",
         ):
             return
 
@@ -279,6 +279,18 @@ class LowerHCPattern(RewritePattern):
                 op,
                 new_ops=[splat, mul],
                 new_results=[mul.result],
+                safe_erase=True,
+            )
+            return
+
+        # ---------------- hc.mul_vec_vec (vector * vector -> vector) ----------------
+        if op.name == "hc.mul_vec_vec":
+            lhs, rhs = op.operands
+            new_op = arith.MuliOp(lhs, rhs)
+            rewriter.replace_op(
+                op,
+                new_ops=[new_op],
+                new_results=[new_op.result],
                 safe_erase=True,
             )
             return
