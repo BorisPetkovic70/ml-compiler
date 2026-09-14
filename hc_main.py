@@ -16,6 +16,7 @@ from middle_end.pipeline import (
     MiddleEndPipeline, MiddleEndPipelineConfig
 )
 from simulator.interpreter import Interpreter
+from back_end.harness_gen import write_harness
 
 def build_context() -> Context:
     ctx = Context()
@@ -87,6 +88,10 @@ def main():
     print("Saving high-level module...")
     with open(original_file, "w", encoding="utf-8") as f:
         f.write(str(module))
+
+    harness_file = build_dir / f"{model_name}_harness.c"
+    write_harness(module, harness_file, func_name="my_func")
+    print(f"Wrote harness: {harness_file}")
 
     sample_args = _sample_args_for_entry(module, "my_func")
     try:

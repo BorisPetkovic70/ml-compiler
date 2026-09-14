@@ -1,5 +1,5 @@
-from xdsl.dialects import arith, builtin, scf
-from xdsl.ir import Block, Operation, OpResult, Region
+from xdsl.dialects import arith, builtin, scf, vector
+from xdsl.ir import Block, Operation, Region
 from xdsl.pattern_rewriter import (
     RewritePattern,
     PatternRewriter
@@ -43,30 +43,6 @@ def _const_zero_like(like_type) -> arith.ConstantOp:
     # scalar integer fallback
     return _const_i32(0)
 
-
-def _const_splat_like(scalar_const_op: arith.ConstantOp, like_vec_type) -> arith.ConstantOp:
-    """Build a vector constant of `like_vec_type` filled with the scalar constant's value."""
-    cval_attr = getattr(scalar_const_op, "value", None)
-    if cval_attr is None:
-        raise RuntimeError("Cannot read scalar constant value; expected ConstantOp.value attribute.")
-
-    if hasattr(cval_attr, "value") and hasattr(cval_attr.value, "data"):
-        scalar_int = int(cval_attr.value.data)
-    elif hasattr(cval_attr, "data"):
-        scalar_int = int(cval_attr.data)
-    else:
-        scalar_int = int(cval_attr)
-
-    count = _vec_num_elements(like_vec_type)
-    dense = builtin.DenseIntOrFPElementsAttr.from_list(like_vec_type, [scalar_int] * count)
-    return arith.ConstantOp(dense)
-
-
-def _defining_op(val) -> Operation | None:
-    """Defining op of an SSA value (robust across xdsl versions; cf. constant_folding fix)."""
-    if isinstance(val, OpResult):
-        return val.op
-    return None
 
 # -----------------------------------------------------------------------------
 #  Lowering pattern: hc -> arith
@@ -264,20 +240,13 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.mul_vec":
             scalar, vec = op.operands
 
-            # arith.muli needs matching types, so splat the scalar to a vector of
-            # vec's type. This currently requires the scalar to be an arith.constant.
-            scalar_op = _defining_op(scalar)
-            if scalar_op is None or scalar_op.name != "arith.constant":
-                raise RuntimeError(
-                    "hc.mul_vec lowering currently expects the scalar operand "
-                    "to be an arith.constant"
-                )
-
-            splat = _const_splat_like(scalar_op, vec.type)
-            mul = arith.MuliOp(vec, splat.result)
+            # arith.muli needs matching types, so broadcast the (possibly runtime)
+            # scalar to vec's vector type.
+            bcast = vector.BroadcastOp(scalar, vec.type)
+            mul = arith.MuliOp(vec, bcast.vector)
             rewriter.replace_op(
                 op,
-                new_ops=[splat, mul],
+                new_ops=[bcast, mul],
                 new_results=[mul.result],
                 safe_erase=True,
             )
