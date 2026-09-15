@@ -1,6 +1,7 @@
 from typing import Any
 from xdsl.ir import BlockArgument, Operation, SSAValue
 from xdsl.dialects import func
+from xdsl.dialects.builtin import VectorType
 
 # -----------------------------
 # Helpers to read constants
@@ -69,6 +70,13 @@ def _elt_binop(a, b, f):
     if isinstance(b, list):
         return [f(a, y) for y in b]
     return f(a, b)
+
+
+def _vec_len(vec_type: VectorType) -> int:
+    n = 1
+    for d in vec_type.shape:
+        n *= int(getattr(d, "data", d))
+    return n
 
 # -----------------------------
 # Interpreter
@@ -161,6 +169,18 @@ class Interpreter:
             if name == "arith.maxsi":
                 a, b = op.operands
                 self._set(op.results[0], _elt_binop(self._get(a), self._get(b), max))
+                continue
+
+            if name == "arith.index_cast":
+                # index vs i32 is not distinguished in this Python-int interpreter.
+                (a,) = op.operands
+                self._set(op.results[0], self._get(a))
+                continue
+
+            if name == "vector.broadcast":
+                (src,) = op.operands
+                n = _vec_len(op.results[0].type)
+                self._set(op.results[0], [self._get(src)] * n)
                 continue
 
             if name == "arith.cmpi":

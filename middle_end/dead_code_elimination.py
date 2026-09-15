@@ -41,7 +41,7 @@ def _is_trivially_dceable(op: Operation) -> bool:
         return False
 
     # Only drop ops from these dialects for now
-    if op.name.startswith("arith."):
+    if op.name.startswith("arith.") or op.name == "vector.broadcast":
         return True
 
     # If we also want to also drop leftover hc.* after lowering, we could include:
