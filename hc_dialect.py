@@ -135,18 +135,6 @@ class HCMulVec(IRDLOperation):
 
 
 @irdl_op_definition
-class HCMulVecVec(IRDLOperation):
-    """vector * vector -> vector (element-wise)"""
-    name = "hc.mul_vec_vec"
-    lhs = operand_def(VecInt)
-    rhs = operand_def(VecInt)
-    res = result_def(VecInt)
-
-    def verify_(self):
-        _verify_bin_same_vec_type(self)
-
-
-@irdl_op_definition
 class HCReluVec(IRDLOperation):
     """ReLU over a vector: max(x, 0) element-wise"""
     name = "hc.relu_vec"
@@ -160,6 +148,17 @@ class HCReluVec(IRDLOperation):
                 f"got res={self.res.type}, x={self.x.type}"
             )
 
+@irdl_op_definition
+class HCMulVecVec(IRDLOperation):
+    """vector * vector -> vector (element-wise)"""
+    name = "hc.mul_vec_vec"
+    lhs = operand_def(VecInt)
+    rhs = operand_def(VecInt)
+    res = result_def(VecInt)
+
+    def verify_(self):
+            _verify_bin_same_vec_type(self)
+
 
 # -----------------------------
 # Dialect: HiCompiler
@@ -168,7 +167,7 @@ HiCompiler = Dialect(
     "hc",
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # scalar ops
-        HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec,  # vector ops
+        HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec         # vector ops
     ),
     (),  # attrs
 )

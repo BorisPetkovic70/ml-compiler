@@ -5,8 +5,7 @@ echo "Compiling backend..."
 
 # More robust way to determine script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-#TOOLCHAIN_BIN_DIR="$SCRIPT_DIR/../../LLVM_IR/llvm-project/build/bin"
-TOOLCHAIN_BIN_DIR="$SCRIPT_DIR/../../../../MLIR_clone/llvm-project/build/bin"
+TOOLCHAIN_BIN_DIR="$SCRIPT_DIR/../../LLVM_IR/llvm-project/build/bin"
 BUILD_DIR=${SCRIPT_DIR}/../build
 
 ${TOOLCHAIN_BIN_DIR}/mlir-opt ${BUILD_DIR}/${MODEL_STEM}_lowered.mlir \
@@ -31,10 +30,10 @@ ${TOOLCHAIN_BIN_DIR}/llc -filetype=obj ${BUILD_DIR}/${MODEL_STEM}_out.ll \
     -o ${BUILD_DIR}/${MODEL_STEM}_out.o
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.o"
 
-clang ${BUILD_DIR}/${MODEL_STEM}_harness.c ${BUILD_DIR}/${MODEL_STEM}_out.o -o \
+clang ${SCRIPT_DIR}/${MODEL_STEM}_harness.c ${BUILD_DIR}/${MODEL_STEM}_out.o -o \
     ${BUILD_DIR}/${MODEL_STEM}_run
 
 echo "Created executable: ${BUILD_DIR}/${MODEL_STEM}_run"
 echo "Running executable..."
 
-${BUILD_DIR}/${MODEL_STEM}_run
+${BUILD_DIR}/${MODEL_STEM}_run 1 1 1 1 100 20 -200 -500 70

@@ -6,26 +6,26 @@ def build_score_model(path: str = MODEL_PATH):
     # ------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------
-    MU = 40.0
-    ALPHA = 2.0
-    P = 2.0
-    LO = 0.0
-    HI = 1000.0
+    MU = 40
+    ALPHA = 2
+    P = 2
+    LO = 0
+    HI = 1000
 
     # ------------------------------------------------------------
     # Input / Output
     # ------------------------------------------------------------
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [])
-    y = helper.make_tensor_value_info("score", TensorProto.FLOAT, [])
+    x = helper.make_tensor_value_info("x", TensorProto.INT32, [])
+    y = helper.make_tensor_value_info("score", TensorProto.INT32, [])
 
     # ------------------------------------------------------------
     # Constant initializers
     # ------------------------------------------------------------
-    mu_init = helper.make_tensor("mu", TensorProto.FLOAT, [], [MU])
-    a_init  = helper.make_tensor("alpha", TensorProto.FLOAT, [], [ALPHA])
-    p_init  = helper.make_tensor("p", TensorProto.FLOAT, [], [P])
-    lo_init = helper.make_tensor("lo", TensorProto.FLOAT, [], [LO])
-    hi_init = helper.make_tensor("hi", TensorProto.FLOAT, [], [HI])
+    mu_init = helper.make_tensor("mu", TensorProto.INT32, [], [MU])
+    a_init  = helper.make_tensor("alpha", TensorProto.INT32, [], [ALPHA])
+    p_init  = helper.make_tensor("p", TensorProto.INT32, [], [P])
+    lo_init = helper.make_tensor("lo", TensorProto.INT32, [], [LO])
+    hi_init = helper.make_tensor("hi", TensorProto.INT32, [], [HI])
 
     # ------------------------------------------------------------
     # Graph nodes
@@ -82,13 +82,20 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
 
     All tensors are vector-shaped [n]; no broadcasting involved.
     """
+
+
+    # ------------------------------------------------------------
+    # Constant initializers
+    # ------------------------------------------------------------
+    w_init = helper.make_tensor("w", TensorProto.INT32, [n], [7,2,3,5])
+
     # ------------------------------------------------------------
     # Inputs / Output  (all vector-shaped: [n])
     # ------------------------------------------------------------
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [n])
-    a = helper.make_tensor_value_info("a", TensorProto.FLOAT, [n])
-    b = helper.make_tensor_value_info("b", TensorProto.FLOAT, [n])
-    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [n])
+    x = helper.make_tensor_value_info("x", TensorProto.INT32, [n])
+    a = helper.make_tensor_value_info("a", TensorProto.INT32, [])
+    b = helper.make_tensor_value_info("b", TensorProto.INT32, [n])
+    y = helper.make_tensor_value_info("y", TensorProto.INT32, [n])
 
     # ------------------------------------------------------------
     # Graph nodes (3 total)
@@ -100,8 +107,13 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
         # t = s + b
         helper.make_node("Add", ["s", "b"], ["t"], name="add_b"),
 
-        # y = relu(t)
-        helper.make_node("Relu", ["t"], ["y"], name="relu"),
+        #p = t*w (vec mul)
+        helper.make_node("Mul", ["t","w"], ["p"], name="mul_tw"),
+
+        # y = relu(p)
+        helper.make_node("Relu", ["p"], ["y"], name="relu"),
+
+
     ]
 
     graph = helper.make_graph(
@@ -109,6 +121,7 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
         name="VecAffineReluGraph",
         inputs=[x, a, b],
         outputs=[y],
+        initializer=[w_init]
     )
 
     model = helper.make_model(
@@ -123,5 +136,5 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
 
 
 if __name__ == "__main__":
-    #build_score_model()
+    build_score_model()
     build_vec_affine_relu_model()

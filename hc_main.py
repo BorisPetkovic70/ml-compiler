@@ -53,7 +53,7 @@ def _sample_args_for_entry(module, func_name):
 
 def main():
     # Optional argument
-    model_arg = sys.argv[1] if len(sys.argv) > 1 else VEC_AFFINE_RELU_MODEL_PATH
+    model_arg = sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH
     model_path = Path(model_arg)
 
     # Extract base name (without extension)
@@ -89,7 +89,9 @@ def main():
     with open(original_file, "w", encoding="utf-8") as f:
         f.write(str(module))
 
-    harness_file = build_dir / f"{model_name}_harness.c"
+    back_end_dir = Path("back_end")
+    harness_file = back_end_dir / f"{model_name}_harness.c"
+    
     write_harness(module, harness_file, func_name="my_func")
     print(f"Wrote harness: {harness_file}")
 
@@ -106,7 +108,7 @@ def main():
         apply_constant_folding=False,
         apply_dce=False,
         run_analysis=False,
-        debug_mode=False,
+        debug_mode=True,
     )
 
     middle_end_pipeline = MiddleEndPipeline(config)
