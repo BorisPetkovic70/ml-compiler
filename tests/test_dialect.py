@@ -4,6 +4,7 @@ constructions and the type-mismatch cases each verify_() is meant to catch.
 import pytest
 
 from xdsl.ir import Block
+from xdsl.dialects.builtin import IntegerType
 from conftest import vec_ty, const_i32, const_vec
 from hc_dialect import (
     HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,
@@ -74,3 +75,33 @@ def test_same_type_scalar_binop_constructs(op_cls):
     a, b = const_i32(2), const_i32(3)
     op = op_cls(operands=[a.result, b.result], result_types=[a.result.type])
     op.verify()
+
+
+@pytest.mark.parametrize("op_cls", [HCPow, HCMax, HCMin])
+def test_same_type_scalar_binop_rejects_mismatched_operand_types(op_cls):
+    """IRDL's bare operand_def(IntegerType) doesn't bind operand widths
+    together, so a mismatched-width pair only verify_() catches."""
+    blk = Block(arg_types=[IntegerType(32), IntegerType(16)])
+    a, b = blk.args
+    op = op_cls(operands=[a, b], result_types=[IntegerType(32)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+@pytest.mark.parametrize("op_cls", [HCPow, HCMax, HCMin])
+def test_same_type_scalar_binop_rejects_mismatched_result_type(op_cls):
+    """Operands match each other but the result type differs."""
+    a, b = const_i32(2), const_i32(3)
+    op = op_cls(operands=[a.result, b.result], result_types=[IntegerType(16)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+@pytest.mark.parametrize("op_cls", VECVEC_BINOPS)
+def test_vecvec_binop_rejects_mismatched_result_type(op_cls):
+    """lhs and rhs match each other, but the result type differs from both --
+    the second raise branch in _verify_bin_same_vec_type."""
+    a, b = const_vec([1, 2, 3, 4]), const_vec([5, 6, 7, 8])
+    op = op_cls(operands=[a.result, b.result], result_types=[vec_ty(8)])
+    with pytest.raises(Exception):
+        op.verify()

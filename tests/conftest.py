@@ -64,6 +64,9 @@ def lower(module: ModuleOp, fold: bool = False, dce: bool = False) -> ModuleOp:
         debug_mode=False,
     )
     MiddleEndPipeline(cfg).apply_passes(module)
+    # apply_passes() never calls verify() itself -- catch structurally invalid
+    # IR here, at the point of lowering, rather than downstream (or never).
+    module.verify()
     return module
 
 
@@ -78,3 +81,12 @@ def _entry_fn(module: ModuleOp, func_name: str = "my_func") -> func.FuncOp:
 def entry_op_names(module: ModuleOp, func_name: str = "my_func") -> list[str]:
     fn = _entry_fn(module, func_name)
     return [op.name for op in list(fn.body.blocks)[0].ops]
+
+
+def find_op(module: ModuleOp, op_name: str, func_name: str = "my_func"):
+    """First op with the given name in the entry function's body, or None."""
+    fn = _entry_fn(module, func_name)
+    for op in list(fn.body.blocks)[0].ops:
+        if op.name == op_name:
+            return op
+    return None

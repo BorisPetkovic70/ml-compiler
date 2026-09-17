@@ -4,7 +4,8 @@ ops, and no hc.* op survives lowering.
 import pytest
 
 from xdsl.dialects.builtin import i32
-from conftest import build_module, const_i32, const_vec, vec_ty, lower, entry_op_names
+from xdsl.dialects import arith
+from conftest import build_module, const_i32, const_vec, vec_ty, lower, entry_op_names, find_op
 from hc_dialect import (
     HCAdd, HCMul, HCSub, HCRelu, HCMax, HCMin,
     HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec,
@@ -82,6 +83,7 @@ def test_mul_vec_runtime_scalar_lowers_via_broadcast():
     lower(m)
     names = entry_op_names(m)
     assert "vector.broadcast" in names
+    assert "arith.muli" in names
     assert not any(n.startswith("hc.") for n in names)
 
 
@@ -109,6 +111,12 @@ def test_max_min_lower_to_cmpi_scf_if(op_cls, expected_control_op):
     assert "arith.cmpi" in names
     assert "scf.if" in names
     assert not any(n.startswith("hc.") for n in names)
+
+    cmp_op = find_op(m, "arith.cmpi")
+    # Compare against xDSL's own canonical predicate encoding (built fresh
+    # from the expected string) rather than hardcoding a duplicate int table.
+    reference = arith.CmpiOp(cmp_op.operands[0], cmp_op.operands[1], expected_control_op)
+    assert cmp_op.predicate == reference.predicate
 
 
 def test_pow_lowers_to_scf_for_with_index_cast():
