@@ -1,0 +1,74 @@
+"""ONNX -> hc op mapping: pins the scalar/vector dispatch logic in
+import_onnx_to_hc_module -- given a declared shape (scalar [] vs vector [n]),
+does each ONNX op_type map to the right hc op?
+"""
+import pytest
+
+onnx = pytest.importorskip("onnx")
+from onnx import helper, TensorProto  # noqa: E402
+
+from front_end.loader import import_onnx_to_hc_module  # noqa: E402
+from conftest import entry_op_names  # noqa: E402
+
+
+def _save_one_node_model(tmp_path, op_type, input_specs, output_shape, name="f"):
+    """input_specs: list of (name, shape) -- shape=[] for scalar, [n] for vector."""
+    inputs = [helper.make_tensor_value_info(n, TensorProto.INT32, s) for n, s in input_specs]
+    output = helper.make_tensor_value_info("y", TensorProto.INT32, output_shape)
+    node = helper.make_node(op_type, [n for n, _ in input_specs], ["y"], name=name)
+    graph = helper.make_graph(nodes=[node], name="g", inputs=inputs, outputs=[output])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    path = tmp_path / f"{name}.onnx"
+    onnx.save(model, str(path))
+    return str(path)
+
+
+@pytest.mark.parametrize("op_type,shape,expected_hc_op", [
+    ("Add", [], "hc.add"),
+    ("Sub", [], "hc.sub"),
+    ("Mul", [], "hc.mul"),
+    ("Relu", [], "hc.relu"),
+    ("Add", [4], "hc.add_vec"),
+    ("Sub", [4], "hc.sub_vec"),
+    ("Relu", [4], "hc.relu_vec"),
+])
+def test_binop_or_unary_dispatches_by_shape(tmp_path, ctx, op_type, shape, expected_hc_op):
+    if op_type == "Relu":
+        specs = [("x", shape)]
+    else:
+        specs = [("a", shape), ("b", shape)]
+    path = _save_one_node_model(tmp_path, op_type, specs, shape)
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    assert expected_hc_op in entry_op_names(module, "my_func")
+
+
+def test_mul_vecvec_dispatches_to_mul_vec_vec(tmp_path, ctx):
+    path = _save_one_node_model(tmp_path, "Mul", [("a", [4]), ("b", [4])], [4])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    assert "hc.mul_vec_vec" in entry_op_names(module, "my_func")
+
+
+def test_mul_scalar_times_vector_dispatches_to_mul_vec(tmp_path, ctx):
+    path = _save_one_node_model(tmp_path, "Mul", [("a", []), ("b", [4])], [4])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    assert "hc.mul_vec" in entry_op_names(module, "my_func")
+
+
+def test_multiple_inputs_all_bound_as_block_args(tmp_path, ctx):
+    """Regression for the old 'assume one scalar input' limitation."""
+    path = _save_one_node_model(tmp_path, "Add", [("a", []), ("b", [])], [])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+
+    from xdsl.dialects import func
+    fn = next(
+        op for block in module.body.blocks for op in block.ops
+        if isinstance(op, func.FuncOp) and op.sym_name.data == "my_func"
+    )
+    assert len(fn.function_type.inputs.data) == 2
+
+
+def test_pow_rejects_vector_operand(tmp_path, ctx):
+    path = _save_one_node_model(tmp_path, "Pow", [("a", [4]), ("b", [4])], [4])
+    with pytest.raises(NotImplementedError):
+        import_onnx_to_hc_module(ctx, path, fn_name="my_func")
