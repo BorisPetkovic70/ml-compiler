@@ -62,7 +62,7 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.add":
             lhs, rhs = op.operands
             new_op = arith.AddiOp(lhs, rhs)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[new_op],
                 new_results=[new_op.result],
@@ -74,7 +74,7 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.mul":
             lhs, rhs = op.operands
             new_op = arith.MuliOp(lhs, rhs)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[new_op],
                 new_results=[new_op.result],
@@ -86,7 +86,7 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.sub":
             lhs, rhs = op.operands
             new_op = arith.SubiOp(lhs, rhs)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[new_op],
                 new_results=[new_op.result],
@@ -101,7 +101,7 @@ class LowerHCPattern(RewritePattern):
 
             if hasattr(arith, "MaxSIOp"):
                 maxop = arith.MaxSIOp(x, c0.result)
-                rewriter.replace_op(
+                rewriter.replace(
                     op,
                     new_ops=[c0, maxop],
                     new_results=[maxop.result],
@@ -145,7 +145,7 @@ class LowerHCPattern(RewritePattern):
             )
 
             # scf.ForOp returns the iter_args results
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[c0, c1, exp_idx, init, loop],
                 new_results=[loop.results[0]],
@@ -172,7 +172,7 @@ class LowerHCPattern(RewritePattern):
                 Region(else_block),
             )
 
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[cmp, if_op],
                 new_results=[if_op.results[0]],
@@ -198,7 +198,7 @@ class LowerHCPattern(RewritePattern):
                 Region(else_block),
             )
 
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[cmp, if_op],
                 new_results=[if_op.results[0]],
@@ -216,7 +216,7 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.add_vec":
             lhs, rhs = op.operands
             new_op = arith.AddiOp(lhs, rhs)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[new_op],
                 new_results=[new_op.result],
@@ -228,7 +228,7 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.sub_vec":
             lhs, rhs = op.operands
             new_op = arith.SubiOp(lhs, rhs)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[new_op],
                 new_results=[new_op.result],
@@ -244,7 +244,7 @@ class LowerHCPattern(RewritePattern):
             # scalar to vec's vector type.
             bcast = vector.BroadcastOp(scalar, vec.type)
             mul = arith.MuliOp(vec, bcast.vector)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[bcast, mul],
                 new_results=[mul.result],
@@ -256,7 +256,7 @@ class LowerHCPattern(RewritePattern):
         if op.name == "hc.mul_vec_vec":
             lhs, rhs = op.operands
             new_op = arith.MuliOp(lhs, rhs)
-            rewriter.replace_op(
+            rewriter.replace(
                 op,
                 new_ops=[new_op],
                 new_results=[new_op.result],
@@ -271,7 +271,7 @@ class LowerHCPattern(RewritePattern):
 
             if hasattr(arith, "MaxSIOp"):
                 maxop = arith.MaxSIOp(x, c0.result)
-                rewriter.replace_op(
+                rewriter.replace(
                     op,
                     new_ops=[c0, maxop],
                     new_results=[maxop.result],

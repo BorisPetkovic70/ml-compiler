@@ -20,7 +20,7 @@ class FoldArithInts(RewritePattern):
             res_ty = op.results[0].type
             splatted = [val] * _vec_len(res_ty)
             c = _make_const(splatted, res_ty)
-            rewriter.replace_op(op, new_ops=[c], new_results=[c.result], safe_erase=True)
+            rewriter.replace(op, new_ops=[c], new_results=[c.result], safe_erase=True)
             return
 
         # Special-case: fold relu lowering if it became maxsi
@@ -31,7 +31,7 @@ class FoldArithInts(RewritePattern):
             a, b = args
             res = _elt_binop(a, b, max)
             c = _make_const(res, op.results[0].type)
-            rewriter.replace_op(op, new_ops=[c], new_results=[c.result], safe_erase=True)
+            rewriter.replace(op, new_ops=[c], new_results=[c.result], safe_erase=True)
             return
 
         # Fold binary integer ops when both operands are constants (scalar or vector)
@@ -51,7 +51,7 @@ class FoldArithInts(RewritePattern):
         res = _elt_binop(a, b, fold_fn_by_op[op.name])
 
         c = _make_const(res, op.results[0].type)
-        rewriter.replace_op(op, new_ops=[c], new_results=[c.result], safe_erase=True)
+        rewriter.replace(op, new_ops=[c], new_results=[c.result], safe_erase=True)
 
 # -----------------------------------------------------------------------------
 # Helper functions
