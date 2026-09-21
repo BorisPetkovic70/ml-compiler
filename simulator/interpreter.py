@@ -1,7 +1,7 @@
 from typing import Any
-from xdsl.ir import BlockArgument, Operation, SSAValue
+from xdsl.ir import Operation, SSAValue
 from xdsl.dialects import func
-from xdsl.dialects.builtin import VectorType
+from xdsl.dialects.builtin import TensorType, VectorType
 
 # -----------------------------
 # Helpers to read constants
@@ -78,6 +78,61 @@ def _vec_len(vec_type: VectorType) -> int:
         n *= int(getattr(d, "data", d))
     return n
 
+
+# -----------------------------
+# Tensor helpers
+#
+# A tensor value is a nested Python list (row-major): a 2-D tensor is a list of
+# rows. Tensors have value semantics, so nothing here mutates its input.
+# -----------------------------
+
+def _tensor_shape(ty: TensorType) -> list[int]:
+    return [int(getattr(d, "data", d)) for d in ty.shape]
+
+
+def _reshape(flat: list, shape: list[int]) -> list:
+    """Row-major flat list -> nested lists of the given shape."""
+    total = 1
+    for d in shape:
+        total *= d
+    if len(flat) != total:
+        raise RuntimeError(f"Cannot reshape {len(flat)} values into shape {shape}")
+    if len(shape) <= 1:
+        return list(flat)
+    step = total // shape[0]
+    return [_reshape(flat[r * step:(r + 1) * step], shape[1:]) for r in range(shape[0])]
+
+
+def _check_index(t: list, i: int) -> None:
+    # Python would silently wrap a negative index, so bound-check explicitly.
+    if not 0 <= i < len(t):
+        raise RuntimeError(f"Tensor index {i} out of bounds for dimension of size {len(t)}")
+
+
+def _tensor_extract(t: list, indices: list[int]):
+    for i in indices:
+        _check_index(t, i)
+        t = t[i]
+    return t
+
+
+def _tensor_insert(t: list, indices: list[int], value) -> list:
+    """Copy of `t` with the element at `indices` replaced (`t` is left intact)."""
+    i, rest = indices[0], indices[1:]
+    _check_index(t, i)
+    new = list(t)
+    new[i] = _tensor_insert(t[i], rest, value) if rest else value
+    return new
+
+
+def _matmul(a: list, b: list) -> list:
+    """Reference (MxK) @ (KxN) -> (MxN), deliberately independent of the lowering."""
+    k = len(b)
+    n = len(b[0]) if k else 0
+    if any(len(row) != k for row in a):
+        raise RuntimeError("matmul: inner dimensions do not agree")
+    return [[sum(row[x] * b[x][j] for x in range(k)) for j in range(n)] for row in a]
+
 # -----------------------------
 # Interpreter
 # -----------------------------
@@ -94,10 +149,11 @@ class Interpreter:
         # print(f"Set SSAValue: {v} = {value}")
         self.env[id(v)] = value
 
-    def run_block(self, block) -> int:
+    def run_block(self, block):
         """
-        Execute a single basic block (straight-line).
-        Returns the integer from func.return.
+        Execute a single basic block (straight-line) up to its terminator.
+        Returns the value of func.return, or -- for a loop body -- the list of
+        values scf.yield yields.
         """
         for op in list(block.ops):
             name = op.name
@@ -106,6 +162,9 @@ class Interpreter:
             if name == "arith.constant":
                 dense = _dense_values(op)
                 if dense is not None:
+                    ty = op.results[0].type
+                    if isinstance(ty, TensorType):
+                        dense = _reshape(dense, _tensor_shape(ty))
                     self._set(op.results[0], dense)
                     continue
                 val = _const_value(op)
@@ -148,6 +207,26 @@ class Interpreter:
             if name == "hc.min":
                 a, b = op.operands
                 self._set(op.results[0], min(self._get(a), self._get(b)))
+                continue
+
+            if name == "hc.matmul":
+                a, b = op.operands
+                self._set(op.results[0], _matmul(self._get(a), self._get(b)))
+                continue
+
+            # --- tensor ops (value semantics: insert returns a new tensor) ---
+            if name == "tensor.extract":
+                t = self._get(op.operands[0])
+                idx = [self._get(i) for i in op.indices]
+                self._set(op.results[0], _tensor_extract(t, idx))
+                continue
+
+            if name == "tensor.insert":
+                idx = [self._get(i) for i in op.indices]
+                self._set(
+                    op.results[0],
+                    _tensor_insert(self._get(op.dest), idx, self._get(op.scalar)),
+                )
                 continue
 
             # --- lowered arith ops (so you can run after lowering too) ---
@@ -203,10 +282,28 @@ class Interpreter:
                 continue
 
             if name == "scf.for":
-                # Try: recognize "pow lowering" pattern and shortcut it.
-                if self._try_eval_pow_lowering(op):
-                    continue
-                raise RuntimeError("Unsupported scf.for (not recognized as pow lowering)")
+                lb, ub, step = (self._get(v) for v in (op.lb, op.ub, op.step))
+                if step <= 0:
+                    raise RuntimeError(f"scf.for step must be positive, got {step}")
+                carried = [self._get(v) for v in op.iter_args]
+                body = op.body.block
+                iv_arg, *carried_args = body.args
+                for iv in range(lb, ub, step):
+                    self._set(iv_arg, iv)
+                    for arg, val in zip(carried_args, carried):
+                        self._set(arg, val)
+                    carried = self.run_block(body)  # values scf.yield hands back
+                if len(carried) != len(op.results):
+                    raise RuntimeError(
+                        f"scf.for yields {len(carried)} values, expected {len(op.results)}"
+                    )
+                for res, val in zip(op.results, carried):
+                    self._set(res, val)
+                continue
+
+            if name == "scf.yield":
+                return [self._get(v) for v in op.operands]
+
             if name == "scf.if":
                 # Treat non-zero as True
                 cond = self._get(op.operands[0]) != 0
@@ -248,16 +345,17 @@ class Interpreter:
                 The xDSL ModuleOp containing the function to execute.
 
             args:
-                A list of integer values that will be bound to the function's
-                input arguments (entry block arguments). The number of elements
+                A list of values bound to the function's input arguments (entry
+                block arguments): an int for a scalar, a list for a vector, a
+                nested list (row-major) for a tensor. The number of elements
                 must match the number of function parameters.
 
             func_name:
                 The name of the function to execute. Defaults to "my_func".
 
         Returns:
-            int:
-                The integer value returned by the `func.return` operation.
+            The value returned by `func.return`: an int, a list (vector), or a
+            nested list (tensor).
         """
         # module.body.blocks[0].ops usually contains top-level ops
         for top_block in module.body.blocks:
@@ -326,73 +424,6 @@ class Interpreter:
             results.append(result)
 
         return results
-
-    def _try_eval_pow_lowering(self, op) -> bool:
-        """
-        Recognize and evaluate the specific lowering:
-          %res = scf.for %iv = %lb to %ub step %step iter_args(%acc = %init) -> (i32) {
-            %m = arith.muli %acc, %base : i32
-            scf.yield %m : i32
-          }
-        If matched: set scf.for result(s) and return True, else False.
-        """
-        # Must have exactly 1 iter_arg result
-        if len(op.results) != 1:
-            return False
-
-        # Must have lb, ub, step at least
-        if len(op.operands) < 4:
-            return False
-
-        lb = self._get(op.operands[0])
-        ub = self._get(op.operands[1])
-        step = self._get(op.operands[2])
-        init = self._get(op.operands[3])  # first iter_arg init
-
-        # Typical pow lowering: lb=0, step=1, ub>=0
-        if lb != 0 or step != 1 or ub < 0:
-            return False
-
-        # Body: single block
-        try:
-            body_block = op.regions[0].blocks[0]
-        except Exception:
-            return False
-
-        ops = list(body_block.ops)
-        # Expect exactly: [arith.muli, scf.yield]
-        if len(ops) != 2:
-            return False
-
-        mul, yld = ops
-        if mul.name != "arith.muli" or yld.name != "scf.yield":
-            return False
-
-        # scf.yield must yield the mul result
-        if len(yld.operands) != 1 or yld.operands[0] is not mul.results[0]:
-            return False
-
-        # mul operands should be: (iter_arg_block_arg, base_value)
-        # We don't want to fully interpret block args; just identify the "base" operand:
-        if len(mul.operands) != 2:
-            return False
-
-        a, b = mul.operands
-
-        # In xDSL, block args are typically instances of BlockArgument.
-        if isinstance(a, BlockArgument) and not isinstance(b, BlockArgument):
-            base_val = self._get(b)
-        elif isinstance(b, BlockArgument) and not isinstance(a, BlockArgument):
-            base_val = self._get(a)
-        else:
-            # Either both are block args or both are not -> not the simple pow pattern
-            return False
-
-        # Evaluate
-        result = init * (base_val ** ub)
-
-        self._set(op.results[0], result)
-        return True
 
     def _eval_scf_if_region_yield(self, region) -> int:
         """
