@@ -6,6 +6,7 @@ echo "Compiling backend..."
 # More robust way to determine script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLCHAIN_BIN_DIR="$SCRIPT_DIR/../../LLVM_IR/llvm-project/build/bin"
+
 BUILD_DIR=${SCRIPT_DIR}/../build
 
 ${TOOLCHAIN_BIN_DIR}/mlir-opt ${BUILD_DIR}/${MODEL_STEM}_lowered.mlir \

@@ -135,6 +135,37 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
     print(f"Saved ONNX model to: {path}")
 
 
+MATMUL_MODEL_PATH = "matmul.onnx"
+
+def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
+    """Build a single-node ONNX model: C = A @ B, A:(MxK), B:(KxN), C:(MxN)."""
+    a = helper.make_tensor_value_info("a", TensorProto.INT32, [m, k])
+    b = helper.make_tensor_value_info("b", TensorProto.INT32, [k, n])
+    c = helper.make_tensor_value_info("c", TensorProto.INT32, [m, n])
+
+    nodes = [
+        helper.make_node("MatMul", ["a", "b"], ["c"], name="matmul"),
+    ]
+
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="MatmulGraph",
+        inputs=[a, b],
+        outputs=[c],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 13)],
+        producer_name="matmul_builder",
+    )
+
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"Saved ONNX model to: {path}")
+
+
 if __name__ == "__main__":
     build_score_model()
     build_vec_affine_relu_model()
+    build_matmul_model()

@@ -5,7 +5,7 @@ from xdsl.irdl import (
     operand_def,
     result_def,
 )
-from xdsl.dialects.builtin import IntegerType, VectorType
+from xdsl.dialects.builtin import IntegerType, VectorType, TensorType
 
 # -----------------------------
 # Operations
@@ -161,13 +161,58 @@ class HCMulVecVec(IRDLOperation):
 
 
 # -----------------------------
+# Tensor operations
+# -----------------------------
+# "2D tensor of integers" type constraint (any element width, rank checked in verify_)
+TensorInt = TensorType.constr(element_type=IntegerType)
+
+
+def _dim(int_attr) -> int:
+    return int_attr.data
+
+
+@irdl_op_definition
+class HCMatmul(IRDLOperation):
+    """2D matrix multiply: (MxK) * (KxN) -> (MxN)"""
+    name = "hc.matmul"
+    lhs = operand_def(TensorInt)
+    rhs = operand_def(TensorInt)
+    res = result_def(TensorInt)
+
+    def verify_(self):
+        lhs_t, rhs_t, res_t = self.lhs.type, self.rhs.type, self.res.type
+
+        for label, t in (("lhs", lhs_t), ("rhs", rhs_t), ("res", res_t)):
+            if len(t.shape) != 2:
+                raise ValueError(f"hc.matmul: {label} must be a rank-2 tensor, got {t}")
+
+        if lhs_t.element_type != rhs_t.element_type or lhs_t.element_type != res_t.element_type:
+            raise ValueError(
+                f"hc.matmul: lhs/rhs/res must share the same element type, got "
+                f"lhs={lhs_t.element_type}, rhs={rhs_t.element_type}, res={res_t.element_type}"
+            )
+
+        m, k = _dim(list(lhs_t.shape)[0]), _dim(list(lhs_t.shape)[1])
+        k2, n = _dim(list(rhs_t.shape)[0]), _dim(list(rhs_t.shape)[1])
+        rm, rn = _dim(list(res_t.shape)[0]), _dim(list(res_t.shape)[1])
+
+        if k != k2:
+            raise ValueError(f"hc.matmul: inner dimensions must agree, got lhs K={k} vs rhs K={k2}")
+        if (rm, rn) != (m, n):
+            raise ValueError(
+                f"hc.matmul: result shape must be ({m}x{n}), got ({rm}x{rn})"
+            )
+
+
+# -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # scalar ops
-        HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec         # vector ops
+        HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec,  # vector ops
+        HCMatmul,                                            # tensor ops
     ),
     (),  # attrs
 )

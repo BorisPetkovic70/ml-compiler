@@ -72,3 +72,23 @@ def test_pow_rejects_vector_operand(tmp_path, ctx):
     path = _save_one_node_model(tmp_path, "Pow", [("a", [4]), ("b", [4])], [4])
     with pytest.raises(NotImplementedError):
         import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+
+
+def test_matmul_dispatches_to_hc_matmul(tmp_path, ctx):
+    """MxK * KxN -> MxN, with M/K/N all distinct to catch a mixed-up dim."""
+    a = helper.make_tensor_value_info("a", TensorProto.INT32, [4, 6])
+    b = helper.make_tensor_value_info("b", TensorProto.INT32, [6, 8])
+    c = helper.make_tensor_value_info("c", TensorProto.INT32, [4, 8])
+    node = helper.make_node("MatMul", ["a", "b"], ["c"], name="mm")
+    graph = helper.make_graph(nodes=[node], name="g", inputs=[a, b], outputs=[c])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    path = str(tmp_path / "matmul.onnx")
+    onnx.save(model, path)
+
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    assert "hc.matmul" in entry_op_names(module, "my_func")
+
+    from conftest import find_op
+    op = find_op(module, "hc.matmul", "my_func")
+    assert [d.data for d in op.results[0].type.shape] == [4, 8]

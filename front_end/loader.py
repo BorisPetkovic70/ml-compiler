@@ -7,6 +7,7 @@ from xdsl.ir import Region, Block
 
 from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
 from hc_dialect import HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec
+from hc_dialect import HCMatmul
 
 # --------------------------------------
 #  Helper functions
@@ -23,10 +24,13 @@ def _vec_type_from_shape(shape) -> builtin.VectorType:
 
 
 def _type_from_value_info(value_info):
-    """i32 for a rank-0 (scalar) ONNX input, VectorType for a shaped one."""
+    """i32 for a rank-0 (scalar) ONNX input, VectorType for rank-1, TensorType
+    for rank-2 (matmul operands)."""
     dims = [d.dim_value for d in value_info.type.tensor_type.shape.dim]
     if not dims:
         return i32
+    if len(dims) == 2:
+        return builtin.TensorType(i32, dims)
     return _vec_type_from_shape(dims)
 
 
@@ -43,6 +47,10 @@ def _const_op_from_tensor(tensor_proto) -> arith.ConstantOp:
 
 def _is_vec(value) -> bool:
     return isinstance(value.type, builtin.VectorType)
+
+
+def _dim_as_int(int_attr) -> int:
+    return int_attr.data
 
 
 # --------------------------------------
@@ -125,6 +133,17 @@ def import_onnx_to_hc_module(
                 hc = HCMulVec(operands=[scalar, vec], result_types=[vec.type])
             else:
                 hc = HCMul(operands=[a, b], result_types=[i32])
+            ops.append(hc)
+            env[node.output[0]] = hc.results[0]
+            continue
+
+        if node.op_type == "MatMul":
+            a = get(node.input[0])
+            b = get(node.input[1])
+            m = _dim_as_int(list(a.type.shape)[0])
+            n = _dim_as_int(list(b.type.shape)[1])
+            res_ty = builtin.TensorType(i32, [m, n])
+            hc = HCMatmul(operands=[a, b], result_types=[res_ty])
             ops.append(hc)
             env[node.output[0]] = hc.results[0]
             continue

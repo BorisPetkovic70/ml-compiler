@@ -7,7 +7,8 @@ import pytest
 from xdsl.context import Context
 from xdsl.ir import Region, Block
 from xdsl.dialects.builtin import (
-    Builtin, ModuleOp, i32, IntegerType, VectorType, DenseIntOrFPElementsAttr,
+    Builtin, ModuleOp, i32, IntegerType, VectorType, TensorType,
+    DenseIntOrFPElementsAttr,
 )
 from xdsl.dialects import func, arith
 from hc_dialect import HiCompiler
@@ -29,6 +30,10 @@ def vec_ty(n: int, width: int = 32) -> VectorType:
         return VectorType([n], elem)
     except TypeError:
         return VectorType(elem, [n])
+
+
+def tensor_ty(m: int, n: int, width: int = 32) -> TensorType:
+    return TensorType(IntegerType(width), [m, n])
 
 
 def const_i32(value: int) -> arith.ConstantOp:

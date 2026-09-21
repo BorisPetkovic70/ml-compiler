@@ -4,11 +4,12 @@ constructions and the type-mismatch cases each verify_() is meant to catch.
 import pytest
 
 from xdsl.ir import Block
-from xdsl.dialects.builtin import IntegerType
-from conftest import vec_ty, const_i32, const_vec
+from xdsl.dialects.builtin import IntegerType, TensorType
+from conftest import vec_ty, tensor_ty, const_i32, const_vec
 from hc_dialect import (
     HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,
     HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec,
+    HCMatmul,
 )
 
 SCALAR_BINOPS = [HCAdd, HCMul, HCSub]
@@ -103,5 +104,47 @@ def test_vecvec_binop_rejects_mismatched_result_type(op_cls):
     the second raise branch in _verify_bin_same_vec_type."""
     a, b = const_vec([1, 2, 3, 4]), const_vec([5, 6, 7, 8])
     op = op_cls(operands=[a.result, b.result], result_types=[vec_ty(8)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_constructs():
+    blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(6, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
+    op.verify()
+
+
+def test_matmul_rejects_non_rank2_operand():
+    blk = Block(arg_types=[TensorType(IntegerType(32), [4]), tensor_ty(6, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_rejects_mismatched_inner_dim():
+    blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(7, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_rejects_mismatched_result_shape():
+    blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(6, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 9)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_rejects_mismatched_element_type():
+    blk = Block(arg_types=[
+        TensorType(IntegerType(32), [4, 6]),
+        TensorType(IntegerType(16), [6, 8]),
+    ])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
     with pytest.raises(Exception):
         op.verify()
