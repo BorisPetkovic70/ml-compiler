@@ -95,3 +95,10 @@ def find_op(module: ModuleOp, op_name: str, func_name: str = "my_func"):
         if op.name == op_name:
             return op
     return None
+
+
+def find_ops(module: ModuleOp, op_name: str, func_name: str = "my_func") -> list:
+    """Every op with the given name anywhere under the entry function, in
+    pre-order -- unlike find_op, this reaches ops nested inside scf.for bodies."""
+    fn = _entry_fn(module, func_name)
+    return [op for op in fn.walk() if op.name == op_name]

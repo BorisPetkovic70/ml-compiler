@@ -1,4 +1,4 @@
-from xdsl.dialects import arith, builtin, scf, vector
+from xdsl.dialects import arith, builtin, scf, tensor, vector
 from xdsl.ir import Block, Operation, Region
 from xdsl.pattern_rewriter import (
     RewritePattern,
@@ -45,6 +45,60 @@ def _const_zero_like(like_type) -> arith.ConstantOp:
 
 
 # -----------------------------------------------------------------------------
+#  Matmul lowering helper
+# -----------------------------------------------------------------------------
+def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
+    """Build the value-semantics loop nest for C[MxN] = A[MxK] @ B[KxN].
+
+    The i and j loops thread the accumulator tensor through iter_args (each
+    tensor.insert yields a *new* tensor); the k loop threads a scalar
+    accumulator. Returns (new_ops, result_value).
+    """
+    m, k_dim = (_as_int(d) for d in lhs.type.shape)
+    n = _as_int(list(rhs.type.shape)[1])
+    elem_ty = res_type.element_type
+    idx_ty = builtin.IndexType()
+
+    # loop-control constants must be index
+    c0, c1, c_m, c_n, c_k = (
+        arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n, k_dim)
+    )
+    # zero-initialised result tensor
+    zero_c = arith.ConstantOp(
+        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * (m * n))
+    )
+
+    # Each loop body block takes (iv, iter_arg); create all three up front so the
+    # inner bodies can reference i and j.
+    i_body = Block(arg_types=[idx_ty, res_type])
+    j_body = Block(arg_types=[idx_ty, res_type])
+    k_body = Block(arg_types=[idx_ty, elem_ty])
+    i, c_i = i_body.args
+    j, c_ij = j_body.args
+    k, acc = k_body.args
+
+    # k loop: acc += A[i,k] * B[k,j]
+    a_val = tensor.ExtractOp(lhs, [i, k], elem_ty)
+    b_val = tensor.ExtractOp(rhs, [k, j], elem_ty)
+    prod = arith.MuliOp(a_val.result, b_val.result)
+    new_acc = arith.AddiOp(acc, prod.result)
+    k_body.add_ops([a_val, b_val, prod, new_acc, scf.YieldOp(new_acc.result)])
+
+    # j loop: C[i,j] = <k-loop result>, threading the tensor
+    zero_acc = arith.ConstantOp.from_int_and_width(0, elem_ty)
+    k_loop = scf.ForOp(c0.result, c_k.result, c1.result, [zero_acc.result], Region(k_body))
+    inserted = tensor.InsertOp(k_loop.results[0], c_ij, [i, j])
+    j_body.add_ops([zero_acc, k_loop, inserted, scf.YieldOp(inserted.result)])
+
+    # i loop: yields the tensor produced by the j loop
+    j_loop = scf.ForOp(c0.result, c_n.result, c1.result, [c_i], Region(j_body))
+    i_body.add_ops([j_loop, scf.YieldOp(j_loop.results[0])])
+    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [zero_c.result], Region(i_body))
+
+    return [c0, c1, c_m, c_n, c_k, zero_c, i_loop], i_loop.results[0]
+
+
+# -----------------------------------------------------------------------------
 #  Lowering pattern: hc -> arith
 # -----------------------------------------------------------------------------
 class LowerHCPattern(RewritePattern):
@@ -55,6 +109,7 @@ class LowerHCPattern(RewritePattern):
         if op.name not in (
             "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
             "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.mul_vec_vec", "hc.relu_vec",
+            "hc.matmul",
         ):
             return
 
@@ -280,6 +335,22 @@ class LowerHCPattern(RewritePattern):
                 return
             else:
                 raise RuntimeError("Cannot lower hc.relu_vec: arith.MaxSIOp needed.")
+
+        # ==========================================================
+        #  Tensor operations
+        # ==========================================================
+
+        # ---------------- hc.matmul (MxK * KxN -> MxN) ----------------
+        if op.name == "hc.matmul":
+            lhs, rhs = op.operands
+            new_ops, result = _build_matmul_nest(lhs, rhs, op.results[0].type)
+            rewriter.replace(
+                op,
+                new_ops=new_ops,
+                new_results=[result],
+                safe_erase=True,
+            )
+            return
 
 
 
