@@ -60,9 +60,10 @@ def run(module: ModuleOp, args=(), func_name: str = "my_func"):
     return Interpreter().run_module(module, args=list(args), func_name=func_name)
 
 
-def lower(module: ModuleOp, fold: bool = False, dce: bool = False) -> ModuleOp:
+def lower(module: ModuleOp, fold: bool = False, dce: bool = False, bufferize: bool = False) -> ModuleOp:
     cfg = MiddleEndPipelineConfig(
         apply_lowering=True,
+        apply_bufferization=bufferize,
         apply_constant_folding=fold,
         apply_dce=dce,
         run_analysis=False,

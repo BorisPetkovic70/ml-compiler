@@ -5,7 +5,7 @@ lowering is correct, without compiling anything.
 import pytest
 
 from xdsl.ir import Block, Region
-from xdsl.dialects import arith, scf, tensor
+from xdsl.dialects import arith, memref, scf, tensor
 from xdsl.dialects.builtin import i32, IndexType, DenseIntOrFPElementsAttr
 from conftest import build_module, const_i32, const_vec, tensor_ty, run, lower
 from hc_dialect import (
@@ -144,10 +144,13 @@ def _matmul_module(m: int, k: int, n: int):
 
 
 @pytest.mark.parametrize("m,k,n", [(2, 3, 4), (1, 1, 1), (3, 1, 2), (1, 5, 1), (4, 4, 4)])
-@pytest.mark.parametrize("fold,dce", [(False, False), (True, True)])
-def test_matmul_semantics_match_numpy_before_and_after_lowering(m, k, n, fold, dce):
-    """The semantic gate for lowering: the native hc.matmul, and the lowered
-    scf.for nest, must both equal NumPy's A @ B (signed values, distinct dims)."""
+@pytest.mark.parametrize("fold,dce,bufferize", [
+    (False, False, False), (True, True, False), (False, False, True), (True, True, True),
+])
+def test_matmul_semantics_match_numpy_before_and_after_lowering(m, k, n, fold, dce, bufferize):
+    """The semantic gate: the native hc.matmul, the lowered scf.for nest (tensors), and
+    -- once bufferize=True -- the bufferized memref version must all equal NumPy's A @ B
+    (signed values, distinct dims), alone and composed with folding/DCE."""
     np = pytest.importorskip("numpy")
     rng = np.random.default_rng(seed=m * 100 + k * 10 + n)
     a = rng.integers(-5, 6, size=(m, k))
@@ -157,8 +160,8 @@ def test_matmul_semantics_match_numpy_before_and_after_lowering(m, k, n, fold, d
 
     module = _matmul_module(m, k, n)
     assert run(module, args) == expected          # native hc.matmul
-    lower(module, fold=fold, dce=dce)
-    assert run(module, args) == expected          # lowered scf.for nest
+    lower(module, fold=fold, dce=dce, bufferize=bufferize)
+    assert run(module, args) == expected          # lowered (and maybe bufferized) IR
 
 
 def test_dense_tensor_constant_is_read_row_major():
@@ -327,4 +330,84 @@ def test_scf_for_rejects_yield_count_mismatch():
         loop = scf.ForOp(c0.result, c3.result, c1.result, [init.result], Region(blk))
         return [c0, c1, c3, init, loop], loop.results[0]
     with pytest.raises(RuntimeError, match="yields 2 values"):
+        run(build_module([], body))
+
+
+# ---- memref: memory semantics (alloc/load/store/dealloc), the opposite of tensor's
+#      value semantics -- exercised directly rather than only inferred from matmul ----
+
+def test_memref_store_is_visible_through_a_different_aliasing_value():
+    """The crux of memory semantics: two separate SSA values that both load from the
+    same buffer must both see a write made through it -- the opposite of
+    tensor.insert, where every SSA value is its own independent snapshot."""
+    def body(_args):
+        alloc = memref.AllocOp.get(i32, shape=[2, 2])
+        i0, i1 = _idx_const(0), _idx_const(1)
+        seven = const_i32(7)
+        store = memref.StoreOp.get(seven.result, alloc.memref, [i0.result, i1.result])
+        load_a = memref.LoadOp.get(alloc.memref, [i0.result, i1.result])
+        load_b = memref.LoadOp.get(alloc.memref, [i0.result, i1.result])
+        out = arith.AddiOp(load_a.results[0], load_b.results[0])
+        return [alloc, i0, i1, seven, store, load_a, load_b, out], out.result
+    m = build_module([], body)
+    m.verify()
+    assert run(m) == 14  # both loads see the stored 7, not an uninitialized/stale value
+
+
+def _memref_load_at(row: int, col: int):
+    def body(_args):
+        alloc = memref.AllocOp.get(i32, shape=[2, 2])
+        i0, i1 = _idx_const(0), _idx_const(0)
+        seven = const_i32(7)
+        store = memref.StoreOp.get(seven.result, alloc.memref, [i0.result, i1.result])
+        r, c = _idx_const(row), _idx_const(col)
+        load = memref.LoadOp.get(alloc.memref, [r.result, c.result])
+        return [alloc, i0, i1, seven, store, r, c, load], load.results[0]
+    return build_module([], body)
+
+
+@pytest.mark.parametrize("row,col", [(2, 0), (0, 2), (0, -1), (-1, 0)])
+def test_memref_load_out_of_bounds_raises(row, col):
+    """Same guard as tensor.extract -- reuses _check_index, no new bounds logic."""
+    with pytest.raises(RuntimeError, match="out of bounds"):
+        run(_memref_load_at(row, col))
+
+
+def test_memref_store_out_of_bounds_raises():
+    def body(_args):
+        alloc = memref.AllocOp.get(i32, shape=[2, 2])
+        r, c = _idx_const(2), _idx_const(0)
+        v = const_i32(7)
+        store = memref.StoreOp.get(v.result, alloc.memref, [r.result, c.result])
+        zero = const_i32(0)
+        return [alloc, r, c, v, store, zero], zero.result
+    with pytest.raises(RuntimeError, match="out of bounds"):
+        run(build_module([], body))
+
+
+def test_memref_use_after_dealloc_raises():
+    """dealloc deletes the buffer's binding rather than adding a bespoke check, so a
+    later use fails exactly the way any other missing-value interpreter bug would."""
+    def body(_args):
+        alloc = memref.AllocOp.get(i32, shape=[2, 2])
+        i0 = _idx_const(0)
+        dealloc = memref.DeallocOp.get(alloc.memref)
+        load = memref.LoadOp.get(alloc.memref, [i0.result, i0.result])
+        return [alloc, i0, dealloc, load], load.results[0]
+    with pytest.raises(KeyError):
+        run(build_module([], body))
+
+
+def test_memref_alloc_fills_with_none_so_an_unwritten_cell_fails_loudly():
+    """alloc deliberately fills with None, not 0: a cell nothing ever writes to must
+    fail the moment it's used in arithmetic, rather than silently computing with 0."""
+    def body(_args):
+        alloc = memref.AllocOp.get(i32, shape=[2, 2])
+        i0, i1 = _idx_const(0), _idx_const(1)
+        seven = const_i32(7)
+        store = memref.StoreOp.get(seven.result, alloc.memref, [i0.result, i0.result])
+        load = memref.LoadOp.get(alloc.memref, [i0.result, i1.result])  # [0,1] never written
+        out = arith.AddiOp(load.results[0], seven.result)
+        return [alloc, i0, i1, seven, store, load, out], out.result
+    with pytest.raises(TypeError):
         run(build_module([], body))

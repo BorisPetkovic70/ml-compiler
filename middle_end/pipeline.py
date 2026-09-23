@@ -9,6 +9,7 @@ from xdsl.pattern_rewriter import (
 )
 
 from .analysis import analyze
+from .bufferization import apply_bufferization
 from .constant_folding import FoldArithInts
 from .dead_code_elimination import apply_dce
 from .hc_lowering import LowerHCPattern
@@ -21,6 +22,7 @@ class MiddleEndPipelineConfig:
     debug_mode: bool = False
 
     apply_lowering: bool = True
+    apply_bufferization: bool = True
     apply_constant_folding: bool = True
     apply_dce: bool = True
 
@@ -37,6 +39,11 @@ class MiddleEndPipeline:
             # Apply lowering
             _apply_pass(module, LowerHCPattern)
             self._print_module(module, "=== AFTER LOWERING  (arith.*) ===")
+
+        if self.config.apply_bufferization:
+            # Bufferize any function using tensors (a no-op on scalar/vector-only ones)
+            apply_bufferization(module)
+            self._print_module(module, "=== AFTER BUFFERIZATION (memref.*) ===")
 
         if self.config.apply_constant_folding:
             # Apply constant folding

@@ -92,3 +92,28 @@ def test_matmul_dispatches_to_hc_matmul(tmp_path, ctx):
     from conftest import find_op
     op = find_op(module, "hc.matmul", "my_func")
     assert [d.data for d in op.results[0].type.shape] == [4, 8]
+
+
+def test_matmul_with_rank2_initializer_operand_types_as_tensor(tmp_path, ctx):
+    """A rank-2 ONNX initializer (a constant weight matrix, not a graph input) feeding
+    hc.matmul must become a TensorType constant, not a VectorType one -- otherwise
+    module.verify() rejects the operand ('should be of base attribute tensor')."""
+    a = helper.make_tensor_value_info("a", TensorProto.INT32, [4, 2])
+    out = helper.make_tensor_value_info("out", TensorProto.INT32, [4, 3])
+    w_init = helper.make_tensor("w", TensorProto.INT32, [2, 3], list(range(6)))
+    node = helper.make_node("MatMul", ["a", "w"], ["out"], name="mm")
+    graph = helper.make_graph(
+        nodes=[node], name="g", inputs=[a], outputs=[out], initializer=[w_init]
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    onnx.checker.check_model(model)
+    path = str(tmp_path / "matmul_const.onnx")
+    onnx.save(model, path)
+
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    module.verify()  # would previously raise: vector<2x3xi32> should be of base attribute tensor
+
+    from conftest import find_op
+    const = find_op(module, "arith.constant", "my_func")
+    assert [d.data for d in const.results[0].type.shape] == [2, 3]
+    assert type(const.results[0].type).__name__ == "TensorType"

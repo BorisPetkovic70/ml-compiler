@@ -1,7 +1,7 @@
 from typing import Any
 from xdsl.ir import Operation, SSAValue
 from xdsl.dialects import func
-from xdsl.dialects.builtin import TensorType, VectorType
+from xdsl.dialects.builtin import MemRefType, TensorType, VectorType
 
 # -----------------------------
 # Helpers to read constants
@@ -86,7 +86,7 @@ def _vec_len(vec_type: VectorType) -> int:
 # rows. Tensors have value semantics, so nothing here mutates its input.
 # -----------------------------
 
-def _tensor_shape(ty: TensorType) -> list[int]:
+def _tensor_shape(ty: TensorType | MemRefType) -> list[int]:
     return [int(getattr(d, "data", d)) for d in ty.shape]
 
 
@@ -123,6 +123,24 @@ def _tensor_insert(t: list, indices: list[int], value) -> list:
     new = list(t)
     new[i] = _tensor_insert(t[i], rest, value) if rest else value
     return new
+
+
+# -----------------------------
+# Memref helpers
+#
+# A memref value uses the same nested-list representation as a tensor, but has
+# memory semantics: memref.store mutates its buffer in place -- the direct opposite
+# of _tensor_insert's "return a copy" -- so two SSA values that alias the same
+# buffer both observe a write through it, which is the whole point of bufferizing.
+# -----------------------------
+
+def _memref_store(buf: list, indices: list[int], value) -> None:
+    """Mutate `buf` in place at `indices` (the opposite of _tensor_insert's copy)."""
+    for i in indices[:-1]:
+        _check_index(buf, i)
+        buf = buf[i]
+    _check_index(buf, indices[-1])
+    buf[indices[-1]] = value
 
 
 def _matmul(a: list, b: list) -> list:
@@ -227,6 +245,38 @@ class Interpreter:
                     op.results[0],
                     _tensor_insert(self._get(op.dest), idx, self._get(op.scalar)),
                 )
+                continue
+
+            # --- memref ops (memory semantics: store mutates its buffer in place) ---
+            if name == "memref.alloc":
+                shape = _tensor_shape(op.results[0].type)
+                total = 1
+                for d in shape:
+                    total *= d
+                # Filled with None, not 0: every cell bufferization allocates is fully
+                # overwritten by a fill loop before any real use, so an unfilled cell
+                # (a bug elsewhere) fails loudly on the first arithmetic that touches
+                # it instead of silently computing with a plausible-looking 0.
+                self._set(op.results[0], _reshape([None] * total, shape))
+                continue
+
+            if name == "memref.load":
+                buf = self._get(op.memref)
+                idx = [self._get(i) for i in op.indices]
+                self._set(op.results[0], _tensor_extract(buf, idx))
+                continue
+
+            if name == "memref.store":
+                buf = self._get(op.memref)
+                idx = [self._get(i) for i in op.indices]
+                _memref_store(buf, idx, self._get(op.value))
+                continue
+
+            if name == "memref.dealloc":
+                # No bespoke use-after-free check: deleting the binding means any later
+                # use of this buffer raises the same KeyError any other missing-value
+                # bug already would.
+                del self.env[id(op.memref)]
                 continue
 
             # --- lowered arith ops (so you can run after lowering too) ---

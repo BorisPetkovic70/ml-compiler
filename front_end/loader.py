@@ -35,13 +35,17 @@ def _type_from_value_info(value_info):
 
 
 def _const_op_from_tensor(tensor_proto) -> arith.ConstantOp:
-    """arith.constant from an ONNX tensor: scalar i32 if rank-0, dense vector otherwise."""
+    """arith.constant from an ONNX tensor: scalar i32 if rank-0, dense tensor if
+    rank-2 (matmul operands), dense vector otherwise."""
     arr = onnx.numpy_helper.to_array(tensor_proto)
     if arr.shape == ():
         return arith.ConstantOp.from_int_and_width(int(arr), 32)
-    vec_ty = _vec_type_from_shape(arr.shape)
+    if len(arr.shape) == 2:
+        ty = builtin.TensorType(i32, list(arr.shape))
+    else:
+        ty = _vec_type_from_shape(arr.shape)
     values = [int(v) for v in arr.reshape(-1).tolist()]
-    dense = builtin.DenseIntOrFPElementsAttr.from_list(vec_ty, values)
+    dense = builtin.DenseIntOrFPElementsAttr.from_list(ty, values)
     return arith.ConstantOp(dense)
 
 

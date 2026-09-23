@@ -1,10 +1,12 @@
 """Structural checks for tensor -> memref bufferization.
 
-apply_bufferization() is not wired into MiddleEndPipeline yet, and the interpreter
-can't execute `memref` ops yet either, so there's no semantic (NumPy-equality) gate
-on the bufferized IR here -- these tests call apply_bufferization() directly on an
-already-lowered module and check the resulting IR's shape, the same two-level
-(structural + attribute/wiring) discipline as test_lowering.py uses for lowering.
+apply_bufferization() is wired into MiddleEndPipeline (see
+test_pipeline_bufferize_flag_wires_in_the_pass below), but these tests mostly call it
+directly on an already-lowered module instead, to isolate the pass's own shape from
+the rest of the pipeline -- the same two-level (structural + attribute/wiring)
+discipline as test_lowering.py uses for lowering. The semantic (NumPy-equality) gate
+on the bufferized IR, run through the interpreter's memref support, lives in
+test_interpreter.py, next to hc.matmul's own semantic gate.
 """
 import pytest
 
@@ -316,3 +318,24 @@ def test_temporary_buffer_not_returned_is_deallocated():
     (ret,) = find_ops(m, "func.return")
     assert dealloc.memref is not ret.operands[0]
     assert {dealloc.memref, ret.operands[0]} == {a.memref for a in allocs}
+
+
+def test_pipeline_bufferize_flag_wires_in_the_pass():
+    """Proves the wiring itself (lower(..., bufferize=True) actually invokes
+    apply_bufferization, in the right order relative to lowering) -- not the pass's
+    own logic, which the rest of this file already covers thoroughly via direct calls."""
+    m, _, _ = _matmul_module()
+    lower(m, bufferize=True)
+    m.verify()
+    assert not any(op.name.startswith("tensor.") for op in m.walk())
+    assert any(op.name == "memref.alloc" for op in m.walk())
+
+
+def test_apply_bufferization_defaults_on_in_the_pipeline_config():
+    """conftest.lower() always passes apply_bufferization explicitly (mirroring the
+    fold/dce test-harness convention), so nothing else exercises the dataclass's own
+    class-level default -- check it directly: it must default True, matching its
+    apply_lowering/apply_constant_folding/apply_dce siblings, the actual switch that
+    makes bufferization run automatically in the real (non-test-harness) pipeline."""
+    from middle_end.pipeline import MiddleEndPipelineConfig
+    assert MiddleEndPipelineConfig().apply_bufferization is True
