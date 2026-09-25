@@ -83,13 +83,17 @@ def _dense_values(op: Operation) -> list[int] | None:
 
 
 def _elt_binop(a, b, f):
-    """Apply f element-wise, broadcasting a scalar against a vector (list)."""
+    """Apply f element-wise, broadcasting a scalar against a vector/tensor (list,
+    recursing into nested lists for rank-2 tensors). Recursion is what makes this
+    correct for a 2-D tensor rather than doing list concatenation per row -- a
+    non-recursive version would silently do that instead of erroring, so this was
+    verified against a real 2-D case, not assumed."""
     if isinstance(a, list) and isinstance(b, list):
-        return [f(x, y) for x, y in zip(a, b)]
+        return [_elt_binop(x, y, f) for x, y in zip(a, b)]
     if isinstance(a, list):
-        return [f(x, b) for x in a]
+        return [_elt_binop(x, b, f) for x in a]
     if isinstance(b, list):
-        return [f(a, y) for y in b]
+        return [_elt_binop(a, y, f) for y in b]
     return f(a, b)
 
 
@@ -213,22 +217,22 @@ class Interpreter:
                 continue
 
             # --- high-level HC ops (scalar and vector variants share semantics) ---
-            if name in ("hc.add", "hc.add_vec"):
+            if name in ("hc.add", "hc.add_vec", "hc.add_tensor"):
                 a, b = op.operands
                 self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p + q))
                 continue
 
-            if name in ("hc.sub", "hc.sub_vec"):
+            if name in ("hc.sub", "hc.sub_vec", "hc.sub_tensor"):
                 a, b = op.operands
                 self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p - q))
                 continue
 
-            if name in ("hc.mul", "hc.mul_vec", "hc.mul_vec_vec"):
+            if name in ("hc.mul", "hc.mul_vec", "hc.mul_vec_vec", "hc.mul_tensor"):
                 a, b = op.operands
                 self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p * q))
                 continue
 
-            if name in ("hc.relu", "hc.relu_vec"):
+            if name in ("hc.relu", "hc.relu_vec", "hc.relu_tensor"):
                 (x,) = op.operands
                 self._set(op.results[0], _elt_binop(self._get(x), 0, max))
                 continue

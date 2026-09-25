@@ -11,6 +11,7 @@ from conftest import build_module, const_i32, const_vec, tensor_ty, run, lower
 from hc_dialect import (
     HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,
     HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec, HCMatmul,
+    HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,
 )
 
 
@@ -162,6 +163,74 @@ def test_matmul_semantics_match_numpy_before_and_after_lowering(m, k, n, fold, d
     assert run(module, args) == expected          # native hc.matmul
     lower(module, fold=fold, dce=dce, bufferize=bufferize)
     assert run(module, args) == expected          # lowered (and maybe bufferized) IR
+
+
+def _tensor_binop_module(op_cls, a_vals, b_vals):
+    def body(args):
+        a, b = args
+        op = op_cls(operands=[a, b], result_types=[a.type])
+        return [op], op.results[0]
+    rows, cols = len(a_vals), len(a_vals[0])
+    m = build_module([tensor_ty(rows, cols), tensor_ty(rows, cols)], body)
+    return m, a_vals, b_vals
+
+
+@pytest.mark.parametrize("op_cls,a,b,expected", [
+    (HCAddTensor, [[1, 2], [3, 4]], [[10, 20], [30, 40]], [[11, 22], [33, 44]]),
+    (HCSubTensor, [[10, 20], [30, 40]], [[1, 2], [3, 4]], [[9, 18], [27, 36]]),
+    (HCMulTensor, [[1, 2], [3, 4]], [[2, 3], [4, 5]], [[2, 6], [12, 20]]),
+])
+def test_tensor_binop_semantics_before_and_after_lowering(op_cls, a, b, expected):
+    """Exercises the now-recursive _elt_binop on real 2D nested-list input -- a
+    non-recursive version would do list concatenation per row instead of this."""
+    m, a_vals, b_vals = _tensor_binop_module(op_cls, a, b)
+    args = [a_vals, b_vals]
+    assert run(m, args) == expected
+    lower(m)
+    assert run(m, args) == expected
+
+
+def test_relu_tensor_semantics_before_and_after_lowering():
+    def body(args):
+        (x,) = args
+        r = HCReluTensor(operands=[x], result_types=[x.type])
+        return [r], r.results[0]
+    m = build_module([tensor_ty(2, 2)], body)
+    x = [[-1, 2], [3, -4]]
+    expected = [[0, 2], [3, 0]]
+    assert run(m, args=[x]) == expected
+    lower(m)
+    assert run(m, args=[x]) == expected
+
+
+def _matmul_then_relu_module(m: int, k: int, n: int):
+    def body(args):
+        a, b = args
+        mm = HCMatmul(operands=[a, b], result_types=[tensor_ty(m, n)])
+        relu = HCReluTensor(operands=[mm.results[0]], result_types=[tensor_ty(m, n)])
+        return [mm, relu], relu.results[0]
+    return build_module([tensor_ty(m, k), tensor_ty(k, n)], body)
+
+
+@pytest.mark.parametrize("fold,dce,bufferize", [
+    (False, False, False), (True, True, False), (False, False, True), (True, True, True),
+])
+def test_chained_matmul_then_relu_tensor_semantics_match_numpy(fold, dce, bufferize):
+    """Chaining hc.matmul into hc.relu_tensor proves the bufferizer correctly threads
+    an intermediate tensor value (the matmul result) into the next op's nest, not just
+    that each op works in isolation."""
+    np = pytest.importorskip("numpy")
+    m, k, n = 2, 3, 4
+    rng = np.random.default_rng(seed=42)
+    a = rng.integers(-5, 6, size=(m, k))
+    b = rng.integers(-5, 6, size=(k, n))
+    expected = np.maximum(a @ b, 0).tolist()
+    args = [a.tolist(), b.tolist()]
+
+    module = _matmul_then_relu_module(m, k, n)
+    assert run(module, args) == expected                                  # native
+    lower(module, fold=fold, dce=dce, bufferize=bufferize)
+    assert run(module, args) == expected                                  # lowered/bufferized
 
 
 def test_dense_tensor_constant_is_read_row_major():

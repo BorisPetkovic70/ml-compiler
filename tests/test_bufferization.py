@@ -17,7 +17,7 @@ from xdsl.dialects.builtin import (
 from xdsl.ir import Block, Region
 
 from conftest import build_module, tensor_ty, lower, find_ops
-from hc_dialect import HCMatmul
+from hc_dialect import HCMatmul, HCReluTensor
 from middle_end.bufferization import apply_bufferization
 
 # M, K, N all distinct so a swapped dimension anywhere in the nest can't hide.
@@ -138,6 +138,38 @@ def test_function_without_tensors_is_left_untouched():
     before = str(m)
     apply_bufferization(m)
     assert str(m) == before
+
+
+def test_chained_matmul_then_relu_tensor_intermediate_buffer_is_threaded_and_freed():
+    """hc.matmul's result is a temporary this pass owns, consumed only by the following
+    hc.relu_tensor -- proves the intermediate buffer is threaded via memref.load (not
+    re-derived some other way) and freed once its one consumer is done with it, rather
+    than leaked or aliased into the returned buffer."""
+    def body(args):
+        a, b = args
+        mm = HCMatmul(operands=[a, b], result_types=[tensor_ty(_M, _N)])
+        relu = HCReluTensor(operands=[mm.results[0]], result_types=[tensor_ty(_M, _N)])
+        return [mm, relu], relu.results[0]
+
+    m = build_module([tensor_ty(_M, _K), tensor_ty(_K, _N)], body)
+    lower(m)
+    apply_bufferization(m)
+    m.verify()
+
+    allocs = find_ops(m, "memref.alloc")
+    assert len(allocs) == 2  # one buffer per tensor value: matmul's result, relu's result
+
+    (ret,) = find_ops(m, "func.return")
+    returned_buf = ret.operands[0]
+    intermediate_buf = next(a.memref for a in allocs if a.memref is not returned_buf)
+
+    # relu's nest reads the matmul buffer directly, not some other value.
+    relu_loads = [ld for ld in find_ops(m, "memref.load") if ld.memref is intermediate_buf]
+    assert len(relu_loads) == 1
+
+    (dealloc,) = find_ops(m, "memref.dealloc")
+    assert dealloc.memref is intermediate_buf
+    assert returned_buf is not intermediate_buf
 
 
 # ---- refusal guards: each must fail loudly rather than silently miscompile --------

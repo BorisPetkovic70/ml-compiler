@@ -32,6 +32,9 @@ def _save_one_node_model(tmp_path, op_type, input_specs, output_shape, name="f")
     ("Add", [4], "hc.add_vec"),
     ("Sub", [4], "hc.sub_vec"),
     ("Relu", [4], "hc.relu_vec"),
+    ("Add", [2, 3], "hc.add_tensor"),
+    ("Sub", [2, 3], "hc.sub_tensor"),
+    ("Relu", [2, 3], "hc.relu_tensor"),
 ])
 def test_binop_or_unary_dispatches_by_shape(tmp_path, ctx, op_type, shape, expected_hc_op):
     if op_type == "Relu":
@@ -53,6 +56,12 @@ def test_mul_scalar_times_vector_dispatches_to_mul_vec(tmp_path, ctx):
     path = _save_one_node_model(tmp_path, "Mul", [("a", []), ("b", [4])], [4])
     module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
     assert "hc.mul_vec" in entry_op_names(module, "my_func")
+
+
+def test_mul_tensor_dispatches_to_mul_tensor(tmp_path, ctx):
+    path = _save_one_node_model(tmp_path, "Mul", [("a", [2, 3]), ("b", [2, 3])], [2, 3])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    assert "hc.mul_tensor" in entry_op_names(module, "my_func")
 
 
 def test_multiple_inputs_all_bound_as_block_args(tmp_path, ctx):

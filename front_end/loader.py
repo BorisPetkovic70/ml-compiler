@@ -25,7 +25,7 @@ from xdsl.ir import Region, Block
 
 from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
 from hc_dialect import HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec
-from hc_dialect import HCMatmul
+from hc_dialect import HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor
 
 # --------------------------------------
 #  Helper functions
@@ -69,6 +69,10 @@ def _const_op_from_tensor(tensor_proto) -> arith.ConstantOp:
 
 def _is_vec(value) -> bool:
     return isinstance(value.type, builtin.VectorType)
+
+
+def _is_tensor(value) -> bool:
+    return isinstance(value.type, builtin.TensorType)
 
 
 def _dim_as_int(int_attr) -> int:
@@ -129,7 +133,12 @@ def import_onnx_to_hc_module(
         if node.op_type == "Add":
             a = get(node.input[0])
             b = get(node.input[1])
-            hc_cls = HCAddVec if (_is_vec(a) and _is_vec(b)) else HCAdd
+            if _is_tensor(a) and _is_tensor(b):
+                hc_cls = HCAddTensor
+            elif _is_vec(a) and _is_vec(b):
+                hc_cls = HCAddVec
+            else:
+                hc_cls = HCAdd
             hc = hc_cls(operands=[a, b], result_types=[a.type])
             ops.append(hc)
             env[node.output[0]] = hc.results[0]
@@ -138,7 +147,12 @@ def import_onnx_to_hc_module(
         if node.op_type == "Sub":
             a = get(node.input[0])
             b = get(node.input[1])
-            hc_cls = HCSubVec if (_is_vec(a) and _is_vec(b)) else HCSub
+            if _is_tensor(a) and _is_tensor(b):
+                hc_cls = HCSubTensor
+            elif _is_vec(a) and _is_vec(b):
+                hc_cls = HCSubVec
+            else:
+                hc_cls = HCSub
             hc = hc_cls(operands=[a, b], result_types=[a.type])
             ops.append(hc)
             env[node.output[0]] = hc.results[0]
@@ -147,7 +161,9 @@ def import_onnx_to_hc_module(
         if node.op_type == "Mul":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_vec(a) and _is_vec(b):
+            if _is_tensor(a) and _is_tensor(b):
+                hc = HCMulTensor(operands=[a, b], result_types=[a.type])
+            elif _is_vec(a) and _is_vec(b):
                 hc = HCMulVecVec(operands=[a, b], result_types=[a.type])
             elif _is_vec(a) or _is_vec(b):
                 # hc.mul_vec is scalar * vector: put the vector operand second.
@@ -172,7 +188,12 @@ def import_onnx_to_hc_module(
 
         if node.op_type == "Relu":
             x = get(node.input[0])
-            hc_cls = HCReluVec if _is_vec(x) else HCRelu
+            if _is_tensor(x):
+                hc_cls = HCReluTensor
+            elif _is_vec(x):
+                hc_cls = HCReluVec
+            else:
+                hc_cls = HCRelu
             hc = hc_cls(operands=[x], result_types=[x.type])
             ops.append(hc)
             env[node.output[0]] = hc.results[0]

@@ -113,6 +113,57 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
 
 
 # -----------------------------------------------------------------------------
+#  Tensor elementwise lowering helper (add/sub/mul/relu_tensor share this)
+# -----------------------------------------------------------------------------
+def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compute):
+    """Build a 2-deep, value-semantics scf.for nest applying `compute` element-wise
+    over rank-2 tensor operand(s), producing a new tensor of res_type.
+
+    Structurally identical to _build_matmul_nest's i/j loops (same value-semantics
+    tensor threading via iter_args) but with no k-reduction -- this is a map, not
+    an accumulate, so two loop levels are enough.
+
+    `operands` is [lhs] for a unary op (relu) or [lhs, rhs] for a binary one.
+    `compute(a_val, b_val_or_None) -> (extra_ops, result_ssa_value)` builds the
+    per-element operation; callers differ only in this closure.
+    """
+    m, n = (_as_int(d) for d in res_type.shape)
+    elem_ty = res_type.element_type
+    idx_ty = builtin.IndexType()
+
+    c0, c1, c_m, c_n = (
+        arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n)
+    )
+    zero_res = arith.ConstantOp(
+        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * (m * n))
+    )
+
+    # Both loop bodies created up front so the inner one can reference i/j.
+    i_body = Block(arg_types=[idx_ty, res_type])
+    j_body = Block(arg_types=[idx_ty, res_type])
+    i, c_i = i_body.args
+    j, c_ij = j_body.args
+
+    extract_ops = [tensor.ExtractOp(operands[0], [i, j], elem_ty)]
+    b_val = None
+    if len(operands) == 2:
+        b_extract = tensor.ExtractOp(operands[1], [i, j], elem_ty)
+        extract_ops.append(b_extract)
+        b_val = b_extract.result
+
+    compute_ops, result_val = compute(extract_ops[0].result, b_val)
+
+    inserted = tensor.InsertOp(result_val, c_ij, [i, j])
+    j_body.add_ops([*extract_ops, *compute_ops, inserted, scf.YieldOp(inserted.result)])
+
+    j_loop = scf.ForOp(c0.result, c_n.result, c1.result, [c_i], Region(j_body))
+    i_body.add_ops([j_loop, scf.YieldOp(j_loop.results[0])])
+    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [zero_res.result], Region(i_body))
+
+    return [c0, c1, c_m, c_n, zero_res, i_loop], i_loop.results[0]
+
+
+# -----------------------------------------------------------------------------
 #  Lowering pattern: hc -> arith
 # -----------------------------------------------------------------------------
 class LowerHCPattern(RewritePattern):
@@ -123,7 +174,7 @@ class LowerHCPattern(RewritePattern):
         if op.name not in (
             "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
             "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.mul_vec_vec", "hc.relu_vec",
-            "hc.matmul",
+            "hc.matmul", "hc.add_tensor", "hc.sub_tensor", "hc.mul_tensor", "hc.relu_tensor",
         ):
             return
 
@@ -364,6 +415,57 @@ class LowerHCPattern(RewritePattern):
                 new_results=[result],
                 safe_erase=True,
             )
+            return
+
+        # ---------------- hc.add_tensor ----------------
+        if op.name == "hc.add_tensor":
+            lhs, rhs = op.operands
+
+            def compute(a, b):
+                add = arith.AddiOp(a, b)
+                return [add], add.result
+
+            new_ops, result = _build_tensor_elementwise_nest([lhs, rhs], op.results[0].type, compute)
+            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
+            return
+
+        # ---------------- hc.sub_tensor ----------------
+        if op.name == "hc.sub_tensor":
+            lhs, rhs = op.operands
+
+            def compute(a, b):
+                sub = arith.SubiOp(a, b)
+                return [sub], sub.result
+
+            new_ops, result = _build_tensor_elementwise_nest([lhs, rhs], op.results[0].type, compute)
+            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
+            return
+
+        # ---------------- hc.mul_tensor ----------------
+        if op.name == "hc.mul_tensor":
+            lhs, rhs = op.operands
+
+            def compute(a, b):
+                mul = arith.MuliOp(a, b)
+                return [mul], mul.result
+
+            new_ops, result = _build_tensor_elementwise_nest([lhs, rhs], op.results[0].type, compute)
+            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
+            return
+
+        # ---------------- hc.relu_tensor ----------------
+        if op.name == "hc.relu_tensor":
+            (x,) = op.operands
+
+            def compute(a, _b):
+                # a's type is the element type (e.g. i32), same idiom as _const_i32
+                # but width-agnostic since hc.matmul (and now this) don't hardcode i32.
+                zero = arith.ConstantOp.from_int_and_width(0, a.type)
+                mx = arith.MaxSIOp(a, zero.result)
+                return [zero, mx], mx.result
+
+            new_ops, result = _build_tensor_elementwise_nest([x], op.results[0].type, compute)
+            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
             return
 
 

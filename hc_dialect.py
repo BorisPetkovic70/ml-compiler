@@ -29,6 +29,15 @@ from xdsl.dialects.builtin import IntegerType, VectorType, TensorType
 # -----------------------------
 # Operations
 # -----------------------------
+
+
+def _verify_bin_same_int_type(op: IRDLOperation):
+    if op.lhs.type != op.rhs.type or op.res.type != op.lhs.type:
+        raise ValueError(
+            f"{op.name}: operands and result must have the exact same integer type, "
+            f"got lhs={op.lhs.type}, rhs={op.rhs.type}, res={op.res.type}"
+        )
+
 @irdl_op_definition
 class HCAdd(IRDLOperation):
     name = "hc.add"
@@ -40,12 +49,18 @@ class HCAdd(IRDLOperation):
     # One i32 result
     res = result_def(IntegerType)
 
+    def verify_(self):
+        _verify_bin_same_int_type(self)
+
 @irdl_op_definition
 class HCMul(IRDLOperation):
     name = "hc.mul"
     lhs = operand_def(IntegerType)
     rhs = operand_def(IntegerType)
     res = result_def(IntegerType)
+
+    def verify_(self):
+        _verify_bin_same_int_type(self)
 
 
 @irdl_op_definition
@@ -55,11 +70,18 @@ class HCSub(IRDLOperation):
     rhs = operand_def(IntegerType)
     res = result_def(IntegerType)
 
+    def verify_(self):
+        _verify_bin_same_int_type(self)
+
 @irdl_op_definition
 class HCRelu(IRDLOperation):
     name = "hc.relu"
     x = operand_def(IntegerType)
     res = result_def(IntegerType)
+
+    def verify_(self):
+        if self.res.type != self.x.type:
+            raise ValueError(f"hc.relu: result type must match operand type")
 
 @irdl_op_definition
 class HCPow(IRDLOperation):
@@ -223,6 +245,79 @@ class HCMatmul(IRDLOperation):
             )
 
 
+def _verify_bin_same_tensor_type(op: IRDLOperation):
+    """Shared verify_() for tensor⊙tensor elementwise ops: unlike hc.matmul (whose
+    operand shapes legitimately differ), lhs/rhs/res must be the exact same rank-2
+    tensor type -- TensorInt alone doesn't bind shape across operands (see module
+    docstring), so this still needs a hand-written check."""
+    lhs_t, rhs_t, res_t = op.lhs.type, op.rhs.type, op.res.type
+    if len(lhs_t.shape) != 2:
+        raise ValueError(f"{op.name}: operands must be rank-2 tensors, got {lhs_t}")
+    if lhs_t != rhs_t:
+        raise ValueError(
+            f"{op.name}: lhs and rhs must have the same tensor type, got {lhs_t} vs {rhs_t}"
+        )
+    if res_t != lhs_t:
+        raise ValueError(
+            f"{op.name}: result must match operand tensor type, got res={res_t}, operand={lhs_t}"
+        )
+
+
+@irdl_op_definition
+class HCAddTensor(IRDLOperation):
+    """Element-wise tensor + tensor -> tensor (rank-2, exact same shape)"""
+    name = "hc.add_tensor"
+    lhs = operand_def(TensorInt)
+    rhs = operand_def(TensorInt)
+    res = result_def(TensorInt)
+
+    def verify_(self):
+        _verify_bin_same_tensor_type(self)
+
+
+@irdl_op_definition
+class HCSubTensor(IRDLOperation):
+    """Element-wise tensor - tensor -> tensor (rank-2, exact same shape)"""
+    name = "hc.sub_tensor"
+    lhs = operand_def(TensorInt)
+    rhs = operand_def(TensorInt)
+    res = result_def(TensorInt)
+
+    def verify_(self):
+        _verify_bin_same_tensor_type(self)
+
+
+@irdl_op_definition
+class HCMulTensor(IRDLOperation):
+    """Element-wise tensor * tensor -> tensor (rank-2, exact same shape).
+    Deliberately no scalar*tensor variant (unlike hc.mul_vec) -- not asked for,
+    and would need a tensor-analogue of vector.broadcast to lower."""
+    name = "hc.mul_tensor"
+    lhs = operand_def(TensorInt)
+    rhs = operand_def(TensorInt)
+    res = result_def(TensorInt)
+
+    def verify_(self):
+        _verify_bin_same_tensor_type(self)
+
+
+@irdl_op_definition
+class HCReluTensor(IRDLOperation):
+    """ReLU over a rank-2 tensor: max(x, 0) element-wise"""
+    name = "hc.relu_tensor"
+    x = operand_def(TensorInt)
+    res = result_def(TensorInt)
+
+    def verify_(self):
+        if len(self.x.type.shape) != 2:
+            raise ValueError(f"hc.relu_tensor: operand must be a rank-2 tensor, got {self.x.type}")
+        if self.res.type != self.x.type:
+            raise ValueError(
+                f"hc.relu_tensor: result must match operand tensor type, "
+                f"got res={self.res.type}, x={self.x.type}"
+            )
+
+
 # -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
@@ -231,7 +326,7 @@ HiCompiler = Dialect(
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # scalar ops
         HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec,  # vector ops
-        HCMatmul,                                            # tensor ops
+        HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor ops
     ),
     (),  # attrs
 )
