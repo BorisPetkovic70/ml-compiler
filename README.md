@@ -96,7 +96,7 @@ in this order:
 ## Repo layout
 
 ```
-hc_dialect.py                  hc dialect: scalar + vector + tensor (hc.matmul) op definitions
+hc_dialect.py                  hc dialect: scalar + vector + tensor (hc.matmul, elementwise add/sub/mul/relu) op definitions
 hc_main.py                     driver: ONNX -> hc module -> middle-end -> .mlir + harness.c
 full_compiler.sh                hc_main.py + back_end/back_end.sh
 pyproject.toml                 pytest config (pythonpath=["."], testpaths=["tests"])
@@ -104,7 +104,7 @@ requirements-dev.txt           dev deps for the test suite: pytest, pytest-cov, 
 tests/                         pytest suite
 front_end/
   build_model.py               ONNX model builders: score, vec_affine_relu, matmul (fixtures)
-  loader.py                    import_onnx_to_hc_module: unified scalar/vector/matmul ONNX -> hc.*
+  loader.py                    import_onnx_to_hc_module: unified scalar/vector/tensor ONNX -> hc.*
 middle_end/
   pipeline.py                  MiddleEndPipeline / MiddleEndPipelineConfig / _apply_pass
   hc_lowering.py                LowerHCPattern: hc.* -> arith./scf./vector./tensor.

@@ -11,6 +11,7 @@ BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "build")
 MODEL_PATH = os.path.join(BASE_DIR, "score_model.onnx")
 VEC_AFFINE_RELU_MODEL_PATH = os.path.join(BASE_DIR, "vec_affine_relu.onnx")
 MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "matmul.onnx")
+CHAINED_TENSOR_MODEL_PATH = os.path.join(BASE_DIR, "chained_tensor_math.onnx")
 
 
 def build_score_model(path: str = MODEL_PATH):
@@ -181,7 +182,56 @@ def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n:
     print(f"Saved ONNX model to: {path}")
 
 
+
+
+def build_chained_tensor_model(path: str = CHAINED_TENSOR_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
+    """Builds Y = ReLU((A @ B) + C). 
+    Proves intermediate tensor buffers are allocated, threaded, and explicitly freed.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    # ------------------------------------------------------------
+    # Inputs / Output (Strictly rank-2 to avoid broadcasting)
+    # ------------------------------------------------------------
+    a = helper.make_tensor_value_info("a", TensorProto.INT32, [m, k])
+    b = helper.make_tensor_value_info("b", TensorProto.INT32, [k, n])
+    c = helper.make_tensor_value_info("c", TensorProto.INT32, [m, n])
+    y = helper.make_tensor_value_info("y", TensorProto.INT32, [m, n])
+
+    # ------------------------------------------------------------
+    # Graph nodes
+    # ------------------------------------------------------------
+    nodes = [
+        # mm_res = A @ B
+        helper.make_node("MatMul", ["a", "b"], ["mm_res"], name="matmul_ab"),
+
+        # add_res = mm_res + C
+        helper.make_node("Add", ["mm_res", "c"], ["add_res"], name="add_c"),
+
+        # y = ReLU(add_res)
+        helper.make_node("Relu", ["add_res"], ["y"], name="relu_out"),
+    ]
+
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="ChainedTensorGraph",
+        inputs=[a, b, c],
+        outputs=[y],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 13)],
+        producer_name="chained_tensor_builder",
+    )
+
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"Saved ONNX model to: {path}")
+
+
 if __name__ == "__main__":
     build_score_model()
     build_vec_affine_relu_model()
     build_matmul_model()
+    build_chained_tensor_model()

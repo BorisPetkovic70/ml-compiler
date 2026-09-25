@@ -7,10 +7,10 @@ two separate, independently-testable decisions -- see docs/DESIGN.md Section 1.
 VecInt/TensorInt (below) constrain element type only -- neither binds shapes
 across an op's operands. This is why every op with a shape relationship between
 its operands (mismatched-width scalar ops, same-shape vector ops, hc.matmul's
-MxK*KxN->MxN) needs its own hand-written verify_(): the type system alone cannot
-express those constraints. See docs/DESIGN.md Section 2 for why scalars, vectors,
-and tensors are modeled as genuinely different op families rather than one
-polymorphic op per operation.
+MxK*KxN->MxN, the tensor elementwise family's exact-shape match) needs its own
+hand-written verify_(): the type system alone cannot express those constraints.
+See docs/DESIGN.md Section 2 for why scalars, vectors, and tensors are modeled
+as genuinely different op families rather than one polymorphic op per operation.
 
 Every op defined here must also be added to the HiCompiler Dialect tuple at the
 bottom of this file -- an op that isn't registered there isn't part of the

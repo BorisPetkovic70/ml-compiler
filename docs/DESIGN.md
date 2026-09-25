@@ -36,7 +36,10 @@ fundamentally different kinds of value, not as one generic "tensor of rank N":
   register — it needs to be visited element-by-element, which means it needs a loop, and a loop
   needs somewhere to read and write, which eventually means memory. This is the fact that
   produces the rest of this document: `hc.matmul` is the first op in the dialect whose lowering
-  has to *introduce* structure (loops) that wasn't in the source op at all.
+  has to *introduce* structure (loops) that wasn't in the source op at all. The tensor elementwise
+  family (`hc.add_tensor`/`sub_tensor`/`mul_tensor`/`relu_tensor`) follows the same pattern —
+  each lowers to a 2-deep `scf.for` nest, one level shallower than matmul's 3-deep nest since a
+  map over every element needs no `k`-reduction.
 
 This is also why the dialect defines separate op families (`HCAdd`/`HCAddVec`, `HCMul`/
 `HCMulVec`/`HCMulVecVec`) instead of one polymorphic op per operation: each family's `verify_()`
@@ -89,8 +92,10 @@ Concretely, this is where it applies:
   the pipeline only ever has one function per module); or a loop yields a different buffer than
   the one it carries. None of these fire on `hc.matmul`'s own generated nest — verified
   empirically that they don't even fire when two `hc.matmul`s are chained and share an
-  intermediate tensor — but they exist so that a *future*, differently-shaped lowering is caught
-  loudly instead of silently miscompiled.
+  intermediate tensor, nor when a *different* op pair is chained (`hc.matmul` feeding
+  `hc.relu_tensor`, see `tests/test_bufferization.py::test_chained_matmul_then_relu_tensor_intermediate_buffer_is_threaded_and_freed`)
+  — but they exist so that a *future*, differently-shaped lowering is caught loudly instead of
+  silently miscompiled.
 - **The harness generator** (`back_end/harness_gen.py`) refuses to generate a C harness for a
   rank-3+ memref, a non-integer element type, a function that takes a memref argument but
   returns something other than a memref, or a signature that mixes a vector argument with a

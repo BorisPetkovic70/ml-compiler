@@ -2,10 +2,10 @@
 
 Each ONNX graph *input*'s hc type is decided once, from its declared shape alone
 (_type_from_value_info: rank-0 -> i32, rank-2 -> TensorType, else -> VectorType).
-Each *node* then picks its concrete hc.* op class (scalar vs. *_vec vs. matmul)
-from the operand types it actually sees at that point in the graph -- not from
-the node's own declared shape, since ONNX doesn't attach one to intermediate
-values the way it does to graph inputs.
+Each *node* then picks its concrete hc.* op class (scalar vs. *_vec vs. *_tensor
+vs. matmul) from the operand types it actually sees at that point in the graph --
+not from the node's own declared shape, since ONNX doesn't attach one to
+intermediate values the way it does to graph inputs.
 
 ONNX *initializers*/`Constant` nodes go through a separate function,
 _const_op_from_tensor, deliberately mirroring the same rank-2 rule -- a constant

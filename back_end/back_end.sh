@@ -56,4 +56,8 @@ echo "Created executable: ${BUILD_DIR}/${MODEL_STEM}_run"
 echo "Running executable..."
 
 #${BUILD_DIR}/${MODEL_STEM}_run 1 1 1 1 100 20 -200 -500 70
-${BUILD_DIR}/${MODEL_STEM}_run 47 12 89 7 56 74 21 98 15 63 8 41 77 29 52 86 11 67 34 95 4 58 72 19 83 46 1 90 27 61 38 54
+#${BUILD_DIR}/${MODEL_STEM}_run 47 12 89 7 56 74 21 98 15 63 8 41 77 29 52 86 11 67 34 95 4 58 72 19 83 46 1 90 27 61 38 54
+${BUILD_DIR}/${MODEL_STEM}_run \
+  1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 \
+  1 2 3 4 -1 -2 -3 -4 5 5 5 5 -10 -10 -10 -10 \
+  10 10 10 10 5 5 5 5 -10 -10 -10 -10 5 5 5 5

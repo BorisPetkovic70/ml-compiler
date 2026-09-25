@@ -36,7 +36,7 @@ HiCompiler = Dialect(
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,      # scalar ops
         HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec,  # vector ops
-        HCMatmul,                                              # tensor ops
+        HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor ops
     ),
     (),  # attrs
 )
@@ -72,7 +72,7 @@ opens with a dispatch guard:
 if op.name not in (
     "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
     "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.mul_vec_vec", "hc.relu_vec",
-    "hc.matmul",
+    "hc.matmul", "hc.add_tensor", "hc.sub_tensor", "hc.mul_tensor", "hc.relu_tensor",
 ):
     return
 ```
