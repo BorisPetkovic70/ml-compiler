@@ -169,18 +169,9 @@ class _Bufferizer:
         new_block.add_op(op.clone(value_mapper=self.vmap))
 
     def _buf(self, value: SSAValue) -> SSAValue:
-        buf = self.bufs.get(value)
-        if buf is None:
-            # Defensive fallback, not currently reachable: every tensor-producing op is
-            # either registered here (a function argument, a splat constant, an insert,
-            # or a dropped scf.for iter_arg) or refused earlier by _clone (line ~164)
-            # before its result can reach _buf. Left uncovered rather than fabricating
-            # an artificial call path, per the project's coverage discipline.
-            raise NotImplementedError(
-                f"bufferization: tensor value has no buffer (produced by "
-                f"{getattr(value.owner, 'name', 'a block argument')!r})"
-            )
-        return buf
+        # If a future bug lets an unregistered tensor slip through,
+        # this instantly raises a KeyError at the exact point of failure.
+        return self.bufs[value]
 
     # ---- tensor constant -> alloc + fill ---------------------------------------
     def _tensor_constant(self, op: arith.ConstantOp, new_block: Block) -> None:

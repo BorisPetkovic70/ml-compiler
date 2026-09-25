@@ -241,3 +241,31 @@ def test_write_harness_writes_the_generated_source(tmp_path):
     from back_end.harness_gen import write_harness
     write_harness(m, out, func_name="my_func")
     assert out.read_text() == generate_harness_c(m, "my_func")
+
+
+def test_refuses_unrecognized_function_name():
+    """_find_entry's fallback: a well-formed module, but the wrong symbol name --
+    the caller asked for a function that isn't in the module at all."""
+    def body(args):
+        a, b = args
+        op = HCAdd(operands=[a, b], result_types=[i32])
+        return [op], op.results[0]
+    m = build_module([i32, i32], body)
+    with pytest.raises(RuntimeError, match="Function not found"):
+        generate_harness_c(m, "not_my_func")
+
+
+def test_refuses_multi_output_function():
+    """generate_harness_c assumes exactly one result throughout (the register-ABI
+    and memref out-parameter paths both hardcode this); a 2-output function must
+    be refused rather than silently harnessed against just the first result."""
+    from xdsl.dialects.builtin import ModuleOp
+    block = Block(arg_types=[i32])
+    (a,) = block.args
+    op1 = arith.AddiOp(a, a)
+    op2 = arith.MuliOp(a, a)
+    block.add_ops([op1, op2, func.ReturnOp(op1.results[0], op2.results[0])])
+    fn = func.FuncOp("my_func", ([i32], [i32, i32]), region=Region(block))
+    m = ModuleOp(ops=[fn])
+    with pytest.raises(RuntimeError, match="expects exactly 1 result"):
+        generate_harness_c(m, "my_func")

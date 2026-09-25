@@ -1,0 +1,29 @@
+name: tests
+
+# quoted "on" sidesteps a well-known YAML 1.1 quirk where a bare `on:` key parses
+# as the boolean True in generic YAML tools (PyYAML included) -- GitHub's own
+# workflow parser special-cases it correctly either way, but quoting it makes the
+# file unambiguous to any tool, not just GitHub's.
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:   # lets you trigger it manually from the Actions tab, no commit needed
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt xdsl==0.70.0 onnx==1.22.0
+
+      - name: Run tests with coverage gate
+        run: |
+          python -m pytest --cov=hc_dialect --cov=middle_end.bufferization \
+            --cov=back_end.harness_gen --cov-report=term-missing \
+            --cov-fail-under=100 -q

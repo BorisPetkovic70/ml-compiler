@@ -1,8 +1,21 @@
 import onnx
 from onnx import helper, TensorProto
 
-MODEL_PATH = "score_model.onnx"
+import os
+import onnx
+from onnx import helper, TensorProto
+
+# Base directory: the "build" folder next to "frontend"
+BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "build")
+
+MODEL_PATH = os.path.join(BASE_DIR, "score_model.onnx")
+VEC_AFFINE_RELU_MODEL_PATH = os.path.join(BASE_DIR, "vec_affine_relu.onnx")
+MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "matmul.onnx")
+
+
 def build_score_model(path: str = MODEL_PATH):
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     # ------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------
@@ -75,14 +88,14 @@ def build_score_model(path: str = MODEL_PATH):
     print(f"Saved ONNX model to: {path}")
 
 
-VEC_AFFINE_RELU_MODEL_PATH = "vec_affine_relu.onnx"
+
 
 def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int = 4):
     """Build a simple 3-node vector model: y = relu(a * x + b), shape [n].
 
     All tensors are vector-shaped [n]; no broadcasting involved.
     """
-
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
     # ------------------------------------------------------------
     # Constant initializers
@@ -135,10 +148,13 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
     print(f"Saved ONNX model to: {path}")
 
 
-MATMUL_MODEL_PATH = "matmul.onnx"
+
 
 def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
     """Build a single-node ONNX model: C = A @ B, A:(MxK), B:(KxN), C:(MxN)."""
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
     a = helper.make_tensor_value_info("a", TensorProto.INT32, [m, k])
     b = helper.make_tensor_value_info("b", TensorProto.INT32, [k, n])
     c = helper.make_tensor_value_info("c", TensorProto.INT32, [m, n])
