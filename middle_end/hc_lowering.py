@@ -1,3 +1,17 @@
+"""Lowers every hc.* operation to arith./scf./vector./tensor.
+
+LowerHCPattern.match_and_rewrite dispatches on op.name against a fixed tuple of
+recognized names before doing anything else. An op name left out of that tuple is
+NOT an error: the pattern silently returns, and the unlowered hc.* op survives
+into whatever runs next (bufferization, the backend), neither of which recognizes
+hc.* at all -- so the failure surfaces far from its actual cause. When adding a new
+hc.* op, add its name to that tuple before writing the lowering branch (see
+docs/HOW_TO_ADD_AN_OP.md), so a missing branch fails immediately as "no matching
+branch" instead of passing through unnoticed.
+
+See docs/DESIGN.md for why lowering exists as a separate stage from bufferization
+(value semantics here; memory semantics is a later, separate pass).
+"""
 from xdsl.dialects import arith, builtin, scf, tensor, vector
 from xdsl.ir import Block, Operation, Region
 from xdsl.pattern_rewriter import (

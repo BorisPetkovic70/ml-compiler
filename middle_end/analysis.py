@@ -1,3 +1,11 @@
+"""Read-only use-def and block-local liveness reporting -- currently unused.
+
+Status: wired to MiddleEndPipelineConfig.run_analysis, but that flag defaults
+False and every current call site (hc_main.py, tests/conftest.py) explicitly
+passes False. Nothing in the pipeline reads this analysis's output or makes a
+decision based on it -- it is dead code today, not a foundation any current pass
+builds on.
+"""
 from typing import Any, Iterable
 from xdsl.dialects import func
 from xdsl.dialects.builtin import ModuleOp

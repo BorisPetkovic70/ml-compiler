@@ -1,3 +1,24 @@
+"""Pure-Python interpreter for hc.*/arith.*/vector.*/tensor.*/memref.*/scf.*.
+
+This is the correctness oracle the whole pytest suite is checked against (see
+docs/DESIGN.md Section 5), not a fallback or a toy: every operator is run through
+here both before and after each transform, and that before/after equality is what
+actually proves a lowering correct.
+
+Value model: scalars are Python ints; vectors are flat lists; tensors and memrefs
+are both row-major nested lists (same representation, opposite semantics -- see
+"Tensor helpers"/"Memref helpers" below and docs/DESIGN.md Section 3).
+
+Known simplifications, not bugs:
+  - `index` and `i32` are not distinguished; both are plain Python ints.
+  - Ints are unbounded (Python's arbitrary precision) -- i32 overflow that would
+    wrap on real hardware simply doesn't happen here.
+  - scf.if only reads the yielded SSA value; it does NOT execute the branch's
+    operations. Harmless today (hc.max/hc.min's lowering -- the only source of
+    scf.if -- yields an already-computed outer value from each branch directly),
+    but would read a stale value if some future op's lowering computed something
+    *inside* a branch rather than merely selecting between two outer values.
+"""
 from typing import Any
 from xdsl.ir import Operation, SSAValue
 from xdsl.dialects import func
