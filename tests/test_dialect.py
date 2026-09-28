@@ -31,7 +31,7 @@ def test_scalar_binop_rejects_mismatched_operand_types(op_cls):
     blk = Block(arg_types=[IntegerType(32), IntegerType(16)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[IntegerType(32)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same integer type"):
         op.verify()
 
 
@@ -40,7 +40,7 @@ def test_scalar_binop_rejects_mismatched_result_type(op_cls):
     """Operands match each other but the result type differs."""
     a, b = const_i32(2), const_i32(3)
     op = op_cls(operands=[a.result, b.result], result_types=[IntegerType(16)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same integer type"):
         op.verify()
 
 
@@ -53,7 +53,7 @@ def test_relu_constructs():
 def test_relu_rejects_result_type_mismatch():
     x = const_i32(5)
     op = HCRelu(operands=[x.result], result_types=[IntegerType(16)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="must match operand type"):
         op.verify()
 
 
@@ -69,7 +69,7 @@ def test_vecvec_binop_rejects_mismatched_shapes(op_cls):
     blk = Block(arg_types=[vec_ty(4), vec_ty(8)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[vec_ty(4)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same vector type"):
         op.verify()
 
 
@@ -82,7 +82,7 @@ def test_mul_vec_scalar_times_vector_constructs():
 def test_mul_vec_rejects_result_type_mismatch():
     s, v = const_i32(3), const_vec([1, 2, 3, 4])
     op = HCMulVec(operands=[s.result, v.result], result_types=[vec_ty(8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="match vector operand type"):
         op.verify()
 
 
@@ -95,7 +95,7 @@ def test_relu_vec_constructs():
 def test_relu_vec_rejects_result_type_mismatch():
     v = const_vec([-1, 2, -3, 4])
     op = HCReluVec(operands=[v.result], result_types=[vec_ty(8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="match operand vector type"):
         op.verify()
 
 
@@ -113,7 +113,7 @@ def test_same_type_scalar_binop_rejects_mismatched_operand_types(op_cls):
     blk = Block(arg_types=[IntegerType(32), IntegerType(16)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[IntegerType(32)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same integer type"):
         op.verify()
 
 
@@ -122,7 +122,7 @@ def test_same_type_scalar_binop_rejects_mismatched_result_type(op_cls):
     """Operands match each other but the result type differs."""
     a, b = const_i32(2), const_i32(3)
     op = op_cls(operands=[a.result, b.result], result_types=[IntegerType(16)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same integer type"):
         op.verify()
 
 
@@ -132,7 +132,7 @@ def test_vecvec_binop_rejects_mismatched_result_type(op_cls):
     the second raise branch in _verify_bin_same_vec_type."""
     a, b = const_vec([1, 2, 3, 4]), const_vec([5, 6, 7, 8])
     op = op_cls(operands=[a.result, b.result], result_types=[vec_ty(8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="match operand vector type"):
         op.verify()
 
 
@@ -149,7 +149,7 @@ def test_tensor_binop_rejects_non_rank2_operand(op_cls):
     blk = Block(arg_types=[TensorType(IntegerType(32), [4]), tensor_ty(2, 3)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="rank-2, or rank-3"):
         op.verify()
 
 
@@ -158,7 +158,7 @@ def test_tensor_binop_rejects_mismatched_shapes(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 4)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same tensor type"):
         op.verify()
 
 
@@ -169,7 +169,7 @@ def test_tensor_binop_rejects_mismatched_result_type(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 3)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 4)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="match operand tensor type"):
         op.verify()
 
 
@@ -186,7 +186,7 @@ def test_tensor_binop_rejects_mismatched_batch_dim(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3, 4), tensor_ty(5, 3, 4)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3, 4)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same tensor type"):
         op.verify()
 
 
@@ -197,7 +197,7 @@ def test_tensor_binop_rejects_rank_4_operand(op_cls):
     ])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3, 4)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="rank-2, or rank-3"):
         op.verify()
 
 
@@ -212,7 +212,7 @@ def test_relu_tensor_rejects_non_rank2_operand():
     blk = Block(arg_types=[TensorType(IntegerType(32), [4])])
     (x,) = blk.args
     op = HCReluTensor(operands=[x], result_types=[TensorType(IntegerType(32), [4])])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="rank-2, or rank-3"):
         op.verify()
 
 
@@ -220,7 +220,7 @@ def test_relu_tensor_rejects_result_type_mismatch():
     blk = Block(arg_types=[tensor_ty(2, 3)])
     (x,) = blk.args
     op = HCReluTensor(operands=[x], result_types=[tensor_ty(2, 4)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="match operand tensor type"):
         op.verify()
 
 
@@ -237,7 +237,7 @@ def test_relu_tensor_rejects_rank_4_operand():
     op = HCReluTensor(
         operands=[x], result_types=[TensorType(IntegerType(32), [2, 2, 3, 4])]
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="rank-2, or rank-3"):
         op.verify()
 
 
@@ -252,7 +252,7 @@ def test_matmul_rejects_non_rank2_operand():
     blk = Block(arg_types=[TensorType(IntegerType(32), [4]), tensor_ty(6, 8)])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="rank-2, or rank-3"):
         op.verify()
 
 
@@ -260,7 +260,7 @@ def test_matmul_rejects_mismatched_inner_dim():
     blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(7, 8)])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="inner dimensions must agree"):
         op.verify()
 
 
@@ -268,7 +268,7 @@ def test_matmul_rejects_mismatched_result_shape():
     blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(6, 8)])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 9)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="result shape must be"):
         op.verify()
 
 
@@ -279,7 +279,7 @@ def test_matmul_rejects_mismatched_element_type():
     ])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="same element type"):
         op.verify()
 
 
@@ -294,7 +294,7 @@ def test_matmul_rejects_mismatched_batch_dim():
     blk = Block(arg_types=[tensor_ty(2, 4, 6), tensor_ty(3, 6, 8)])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="batch dimensions must match"):
         op.verify()
 
 
@@ -304,7 +304,7 @@ def test_matmul_rejects_mismatched_ranks():
     blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(2, 6, 8)])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="must all be the same rank"):
         op.verify()
 
 
@@ -314,5 +314,5 @@ def test_matmul_rejects_rank_4_operand():
     ])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="rank-2, or rank-3"):
         op.verify()
