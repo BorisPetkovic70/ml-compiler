@@ -9,9 +9,11 @@ compiling and running it can confirm the ABI is right.
 Skipped whenever the LLVM/MLIR toolchain isn't on PATH, so the rest of the suite stays
 toolchain-free -- these are the only tests in the project that spawn a subprocess.
 """
+import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -93,6 +95,9 @@ def _parse_ints(text: str) -> list[int]:
     return [int(v) for v in re.findall(r"-?\d+", text)]
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 def test_scalar_abi_compiles_and_matches_independent_oracle(tmp_path):
     """Register ABI, scalar-only signature: calls the compiled function directly,
     scalars passed as plain int. score = relu(min(max(alpha*abs(x-mu)**p, lo), hi))."""
@@ -148,4 +153,51 @@ def test_memref_abi_compiles_and_matches_independent_oracle(tmp_path):
     args = [*a.flatten().tolist(), *b.flatten().tolist()]
     stdout = _compile_and_run(tmp_path, onnx_path, args)
     actual = [_parse_ints(row) for row in stdout.splitlines() if row.strip()]
+    assert actual == expected
+
+
+def test_real_scripts_compile_and_run_end_to_end_matches_numpy():
+    """Runs the ACTUAL hc_main.py and back_end.sh scripts as subprocesses -- unlike
+    the other tests in this file, which import the pipeline functions directly and
+    replicate back_end.sh's compile steps by hand. This is the layer that catches a
+    bug in the scripts' own path/stem/argument-handling logic (the class of bug that's
+    hit this project twice before, per CLAUDE.md's Milestones), which the other tests
+    can't see since they never invoke the scripts themselves.
+
+    Uses a model name distinct from any the user compiles by hand, so it doesn't
+    clobber their own build/ or back_end/*_harness.c files; those directories aren't
+    isolated per-test the way tmp_path is, since the scripts hardcode them."""
+    np = pytest.importorskip("numpy")
+
+    model_name = "test_compiled_backend_e2e"
+    onnx_path = _REPO_ROOT / "build" / f"{model_name}.onnx"
+    m, k, n = 2, 3, 4
+    build_matmul_model(str(onnx_path), m=m, k=k, n=n)
+
+    rng = np.random.default_rng(seed=99)
+    a = rng.integers(-5, 6, size=(m, k))
+    b = rng.integers(-5, 6, size=(k, n))
+    expected = np.matmul(a, b).tolist()
+
+    subprocess.run(
+        ["python3", "hc_main.py", f"{model_name}.onnx"],
+        cwd=_REPO_ROOT, check=True, capture_output=True, text=True,
+    )
+
+    # TOOLCHAIN_BIN_DIR override: back_end.sh's own default points at a hardcoded,
+    # machine-specific LLVM build (see CLAUDE.md) that won't exist here or on most
+    # machines -- this is the fix that makes it possible to run the script for real.
+    toolchain_dir = os.path.dirname(shutil.which("mlir-opt"))
+    run_args = [*a.flatten().tolist(), *b.flatten().tolist()]
+    result = subprocess.run(
+        ["back_end/back_end.sh", f"{model_name}.onnx", *[str(v) for v in run_args]],
+        cwd=_REPO_ROOT, check=True, capture_output=True, text=True,
+        env={**os.environ, "TOOLCHAIN_BIN_DIR": toolchain_dir},
+    )
+
+    # back_end.sh's own progress lines ("Compiling backend...", "Created file: ...")
+    # share stdout with the executable it runs at the end; the executable's own
+    # output is always the last M printed lines (one per matmul result row).
+    printed = [line for line in result.stdout.splitlines() if line.strip()]
+    actual = [_parse_ints(row) for row in printed[-m:]]
     assert actual == expected
