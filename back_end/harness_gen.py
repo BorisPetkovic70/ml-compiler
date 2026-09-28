@@ -151,6 +151,35 @@ def _row_major_strides(dims: list[int]) -> list[int]:
     return strides
 
 
+def _print_result_lines(out_dims: list[int]) -> list[str]:
+    """Nested for-loops printing result.aligned in bracketed rows: every
+    dimension but the last wraps a for-loop that prints '[' on entry and ']'
+    plus a newline on exit; the last dimension is the flat, comma-separated
+    printf loop over individual elements. A rank-1 result has no wrapping
+    loop at all -- just the single bracketed line -- and each additional
+    dimension adds one more wrapping loop around that same innermost line."""
+    rank = len(out_dims)
+    ivs = [f"i{d}" for d in range(rank)]
+    idx = "result.offset + " + " + ".join(
+        f"{iv} * result.strides[{d}]" for d, iv in enumerate(ivs)
+    )
+    last = ivs[-1]
+
+    lines = []
+    indent = "    "
+    for d in range(rank - 1):
+        lines.append(f"{indent}for (int64_t {ivs[d]} = 0; {ivs[d]} < result.sizes[{d}]; {ivs[d]}++) {{")
+        indent += "    "
+    lines.append(f'{indent}printf("[");')
+    lines.append(f"{indent}for (int64_t {last} = 0; {last} < result.sizes[{rank - 1}]; {last}++)")
+    lines.append(f'{indent}    printf({last} ? ", %d" : "%d", (int)result.aligned[{idx}]);')
+    lines.append(f'{indent}printf("]\\n");')
+    for _ in range(rank - 1):
+        indent = indent[:-4]
+        lines.append(f"{indent}}}")
+    return lines
+
+
 def _generate_memref_harness(func_name, in_types, out_type) -> str:
     if not isinstance(out_type, MemRefType):
         raise RuntimeError(
@@ -165,9 +194,10 @@ def _generate_memref_harness(func_name, in_types, out_type) -> str:
 
     memref_types = [t for t in in_types if isinstance(t, MemRefType)] + [out_type]
     for t in memref_types:
-        if len(_memref_dims(t)) not in (1, 2):
+        if len(_memref_dims(t)) not in (1, 2, 3):
             raise RuntimeError(
-                f"harness generator: only rank-1 and rank-2 memrefs are supported, got {t}"
+                f"harness generator: only rank-1, rank-2, and rank-3 (batched) "
+                f"memrefs are supported, got {t}"
             )
 
     lines = ["#include <stdio.h>", "#include <stdlib.h>", "#include <stdint.h>", ""]
@@ -233,24 +263,7 @@ def _generate_memref_harness(func_name, in_types, out_type) -> str:
         "",
     ]
 
-    idx = "result.offset + i0 * result.strides[0]"
-    if len(out_dims) == 2:
-        idx += " + i1 * result.strides[1]"
-        lines += [
-            "    for (int64_t i0 = 0; i0 < result.sizes[0]; i0++) {",
-            '        printf("[");',
-            "        for (int64_t i1 = 0; i1 < result.sizes[1]; i1++)",
-            f'            printf(i1 ? ", %d" : "%d", (int)result.aligned[{idx}]);',
-            '        printf("]\\n");',
-            "    }",
-        ]
-    else:
-        lines += [
-            '    printf("[");',
-            "    for (int64_t i0 = 0; i0 < result.sizes[0]; i0++)",
-            f'        printf(i0 ? ", %d" : "%d", (int)result.aligned[{idx}]);',
-            '    printf("]\\n");',
-        ]
+    lines += _print_result_lines(out_dims)
 
     lines.append("")
     lines.append("    free(result.allocated);")

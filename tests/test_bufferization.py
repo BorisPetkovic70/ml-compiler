@@ -60,6 +60,46 @@ def test_no_tensor_ops_survive_bufferization():
     assert names.count("memref.store") == 2    # 1 for the zero-fill, 1 for the real store
 
 
+def _batched_matmul_module():
+    """hc.matmul on two rank-3 (batched) tensor block args, lowered; returns (module, A, B)."""
+    captured = {}
+
+    def body(args):
+        a, b = args
+        captured["a"], captured["b"] = a, b
+        op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, _M, _N)])
+        return [op], op.results[0]
+
+    m = build_module([tensor_ty(2, _M, _K), tensor_ty(2, _K, _N)], body)
+    lower(m)
+    return m, captured["a"], captured["b"]
+
+
+def test_batched_tensor_bufferizes_with_the_same_op_counts_as_rank_2():
+    """apply_bufferization has no rank-specific code anywhere: _fill_ops loops over
+    however many dims the tensor constant has, _extract/_insert pass op.indices
+    through regardless of count, and _memref_type converts via .shape generically.
+    This proves a rank-3 (batched) tensor bufferizes with the exact same op-count
+    shape as rank-2, empirically, rather than only asserting it from reading the
+    pass's source."""
+    m, _, _ = _batched_matmul_module()
+    apply_bufferization(m)
+    m.verify()
+    names = [op.name for op in m.walk()]
+    assert not any(n.startswith("tensor.") for n in names)
+    assert names.count("memref.alloc") == 1
+    assert names.count("memref.load") == 2
+    assert names.count("memref.store") == 2  # 1 zero-fill, 1 real store
+
+    fn = next(op for blk in m.body.blocks for op in blk.ops if isinstance(op, func.FuncOp))
+    assert all(isinstance(t, MemRefType) for t in fn.function_type.inputs)
+    assert all(isinstance(t, MemRefType) for t in fn.function_type.outputs)
+
+    a_ld, b_ld = find_ops(m, "memref.load")
+    assert len(a_ld.indices) == 3  # batch, i, k
+    assert len(b_ld.indices) == 3  # batch, k, j
+
+
 def test_i_and_j_loops_drop_iter_args_k_loop_keeps_its_accumulator():
     """The value-semantics-to-memory-semantics transformation, made concrete: stores
     now mutate one buffer, so the outer two loops (which used to thread the result

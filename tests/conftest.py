@@ -32,8 +32,10 @@ def vec_ty(n: int, width: int = 32) -> VectorType:
         return VectorType(elem, [n])
 
 
-def tensor_ty(m: int, n: int, width: int = 32) -> TensorType:
-    return TensorType(IntegerType(width), [m, n])
+def tensor_ty(*dims: int, width: int = 32) -> TensorType:
+    """TensorType<...xi32> from 2 dims (MxN) or 3 dims (a leading batch dim,
+    BxMxN)."""
+    return TensorType(IntegerType(width), list(dims))
 
 
 def const_i32(value: int) -> arith.ConstantOp:

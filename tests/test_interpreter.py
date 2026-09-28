@@ -136,33 +136,53 @@ def _idx_const(value: int) -> arith.ConstantOp:
     return arith.ConstantOp.from_int_and_width(value, IndexType())
 
 
-def _matmul_module(m: int, k: int, n: int):
+def _matmul_module(m: int, k: int, n: int, batch: int | None = None):
+    a_ty = tensor_ty(batch, m, k) if batch else tensor_ty(m, k)
+    b_ty = tensor_ty(batch, k, n) if batch else tensor_ty(k, n)
+    res_ty = tensor_ty(batch, m, n) if batch else tensor_ty(m, n)
+
     def body(args):
         a, b = args
-        op = HCMatmul(operands=[a, b], result_types=[tensor_ty(m, n)])
+        op = HCMatmul(operands=[a, b], result_types=[res_ty])
         return [op], op.results[0]
-    return build_module([tensor_ty(m, k), tensor_ty(k, n)], body)
+    return build_module([a_ty, b_ty], body)
 
 
-@pytest.mark.parametrize("m,k,n", [(2, 3, 4), (1, 1, 1), (3, 1, 2), (1, 5, 1), (4, 4, 4)])
+@pytest.mark.parametrize("batch,m,k,n", [
+    (None, 2, 3, 4), (None, 1, 1, 1), (None, 3, 1, 2), (None, 1, 5, 1), (None, 4, 4, 4),
+    (2, 2, 3, 4), (3, 1, 2, 2),
+])
 @pytest.mark.parametrize("fold,dce,bufferize", [
     (False, False, False), (True, True, False), (False, False, True), (True, True, True),
 ])
-def test_matmul_semantics_match_numpy_before_and_after_lowering(m, k, n, fold, dce, bufferize):
+def test_matmul_semantics_match_numpy_before_and_after_lowering(batch, m, k, n, fold, dce, bufferize):
     """The semantic gate: the native hc.matmul, the lowered scf.for nest (tensors), and
-    -- once bufferize=True -- the bufferized memref version must all equal NumPy's A @ B
-    (signed values, distinct dims), alone and composed with folding/DCE."""
+    -- once bufferize=True -- the bufferized memref version must all equal NumPy's
+    matmul (signed values, distinct dims, plain and batched), alone and composed with
+    folding/DCE. np.matmul batches over a leading dimension natively, so this is the
+    same comparison either way."""
     np = pytest.importorskip("numpy")
-    rng = np.random.default_rng(seed=m * 100 + k * 10 + n)
-    a = rng.integers(-5, 6, size=(m, k))
-    b = rng.integers(-5, 6, size=(k, n))
-    expected = (a @ b).tolist()
+    rng = np.random.default_rng(seed=m * 100 + k * 10 + n + (batch or 0) * 1000)
+    a_shape = (batch, m, k) if batch else (m, k)
+    b_shape = (batch, k, n) if batch else (k, n)
+    a = rng.integers(-5, 6, size=a_shape)
+    b = rng.integers(-5, 6, size=b_shape)
+    expected = np.matmul(a, b).tolist()
     args = [a.tolist(), b.tolist()]
 
-    module = _matmul_module(m, k, n)
+    module = _matmul_module(m, k, n, batch)
     assert run(module, args) == expected          # native hc.matmul
     lower(module, fold=fold, dce=dce, bufferize=bufferize)
     assert run(module, args) == expected          # lowered (and maybe bufferized) IR
+
+
+def _shape_of(vals) -> list[int]:
+    shape = []
+    v = vals
+    while isinstance(v, list):
+        shape.append(len(v))
+        v = v[0] if v else None
+    return shape
 
 
 def _tensor_binop_module(op_cls, a_vals, b_vals):
@@ -170,8 +190,8 @@ def _tensor_binop_module(op_cls, a_vals, b_vals):
         a, b = args
         op = op_cls(operands=[a, b], result_types=[a.type])
         return [op], op.results[0]
-    rows, cols = len(a_vals), len(a_vals[0])
-    m = build_module([tensor_ty(rows, cols), tensor_ty(rows, cols)], body)
+    ty = tensor_ty(*_shape_of(a_vals))
+    m = build_module([ty, ty], body)
     return m, a_vals, b_vals
 
 
@@ -179,10 +199,18 @@ def _tensor_binop_module(op_cls, a_vals, b_vals):
     (HCAddTensor, [[1, 2], [3, 4]], [[10, 20], [30, 40]], [[11, 22], [33, 44]]),
     (HCSubTensor, [[10, 20], [30, 40]], [[1, 2], [3, 4]], [[9, 18], [27, 36]]),
     (HCMulTensor, [[1, 2], [3, 4]], [[2, 3], [4, 5]], [[2, 6], [12, 20]]),
+    (HCAddTensor, [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+     [[[10, 20], [30, 40]], [[50, 60], [70, 80]]],
+     [[[11, 22], [33, 44]], [[55, 66], [77, 88]]]),
+    (HCMulTensor, [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+     [[[2, 3], [4, 5]], [[2, 3], [4, 5]]],
+     [[[2, 6], [12, 20]], [[10, 18], [28, 40]]]),
 ])
 def test_tensor_binop_semantics_before_and_after_lowering(op_cls, a, b, expected):
-    """Exercises the now-recursive _elt_binop on real 2D nested-list input -- a
-    non-recursive version would do list concatenation per row instead of this."""
+    """Exercises the now-recursive _elt_binop on real nested-list input, both plain
+    2D and batched (3D, a list of 2D slices) -- a non-recursive version would do list
+    concatenation per row instead of this, and a batch-unaware one would only see the
+    2D case."""
     m, a_vals, b_vals = _tensor_binop_module(op_cls, a, b)
     args = [a_vals, b_vals]
     assert run(m, args) == expected
@@ -203,31 +231,51 @@ def test_relu_tensor_semantics_before_and_after_lowering():
     assert run(m, args=[x]) == expected
 
 
-def _matmul_then_relu_module(m: int, k: int, n: int):
+def test_relu_tensor_semantics_before_and_after_lowering_batched():
+    def body(args):
+        (x,) = args
+        r = HCReluTensor(operands=[x], result_types=[x.type])
+        return [r], r.results[0]
+    m = build_module([tensor_ty(2, 2, 2)], body)
+    x = [[[-1, 2], [3, -4]], [[5, -6], [-7, 8]]]
+    expected = [[[0, 2], [3, 0]], [[5, 0], [0, 8]]]
+    assert run(m, args=[x]) == expected
+    lower(m)
+    assert run(m, args=[x]) == expected
+
+
+def _matmul_then_relu_module(m: int, k: int, n: int, batch: int | None = None):
+    a_ty = tensor_ty(batch, m, k) if batch else tensor_ty(m, k)
+    b_ty = tensor_ty(batch, k, n) if batch else tensor_ty(k, n)
+    res_ty = tensor_ty(batch, m, n) if batch else tensor_ty(m, n)
+
     def body(args):
         a, b = args
-        mm = HCMatmul(operands=[a, b], result_types=[tensor_ty(m, n)])
-        relu = HCReluTensor(operands=[mm.results[0]], result_types=[tensor_ty(m, n)])
+        mm = HCMatmul(operands=[a, b], result_types=[res_ty])
+        relu = HCReluTensor(operands=[mm.results[0]], result_types=[res_ty])
         return [mm, relu], relu.results[0]
-    return build_module([tensor_ty(m, k), tensor_ty(k, n)], body)
+    return build_module([a_ty, b_ty], body)
 
 
+@pytest.mark.parametrize("batch", [None, 2])
 @pytest.mark.parametrize("fold,dce,bufferize", [
     (False, False, False), (True, True, False), (False, False, True), (True, True, True),
 ])
-def test_chained_matmul_then_relu_tensor_semantics_match_numpy(fold, dce, bufferize):
+def test_chained_matmul_then_relu_tensor_semantics_match_numpy(batch, fold, dce, bufferize):
     """Chaining hc.matmul into hc.relu_tensor proves the bufferizer correctly threads
     an intermediate tensor value (the matmul result) into the next op's nest, not just
-    that each op works in isolation."""
+    that each op works in isolation -- plain and batched."""
     np = pytest.importorskip("numpy")
     m, k, n = 2, 3, 4
-    rng = np.random.default_rng(seed=42)
-    a = rng.integers(-5, 6, size=(m, k))
-    b = rng.integers(-5, 6, size=(k, n))
-    expected = np.maximum(a @ b, 0).tolist()
+    rng = np.random.default_rng(seed=42 + (batch or 0))
+    a_shape = (batch, m, k) if batch else (m, k)
+    b_shape = (batch, k, n) if batch else (k, n)
+    a = rng.integers(-5, 6, size=a_shape)
+    b = rng.integers(-5, 6, size=b_shape)
+    expected = np.maximum(np.matmul(a, b), 0).tolist()
     args = [a.tolist(), b.tolist()]
 
-    module = _matmul_then_relu_module(m, k, n)
+    module = _matmul_then_relu_module(m, k, n, batch)
     assert run(module, args) == expected                                  # native
     lower(module, fold=fold, dce=dce, bufferize=bufferize)
     assert run(module, args) == expected                                  # lowered/bufferized

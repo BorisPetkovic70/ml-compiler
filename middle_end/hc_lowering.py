@@ -62,25 +62,51 @@ def _const_zero_like(like_type) -> arith.ConstantOp:
 #  Matmul lowering helper
 # -----------------------------------------------------------------------------
 def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
-    """Build the value-semantics loop nest for C[MxN] = A[MxK] @ B[KxN].
+    """Build the value-semantics loop nest for C = A @ B: (MxK)@(KxN)->(MxN)
+    when res_type is rank-2, or an outer batch loop wrapping that same nest
+    when res_type is rank-3 ((BxMxK)@(BxKxN)->(BxMxN)).
 
-    The i and j loops thread the accumulator tensor through iter_args (each
-    tensor.insert yields a *new* tensor); the k loop threads a scalar
-    accumulator. Returns (new_ops, result_value).
+    The outermost loops (the batch loop, when present, then i, then j) thread
+    the accumulator tensor through iter_args (each tensor.insert yields a
+    *new* tensor); the innermost k loop threads a scalar accumulator. Every
+    extract/insert index list is prefixed with the batch induction variable
+    when a batch dim is present, and is just [i,k]/[k,j]/[i,j] otherwise.
+    Returns (new_ops, result_value).
     """
-    m, k_dim = (_as_int(d) for d in lhs.type.shape)
-    n = _as_int(list(rhs.type.shape)[1])
+    res_dims = [_as_int(d) for d in res_type.shape]
+    batched = len(res_dims) == 3
+    batch_dim, m, n = (res_dims if batched else (None, *res_dims))
+    k_dim = _as_int(list(lhs.type.shape)[-1])
     elem_ty = res_type.element_type
     idx_ty = builtin.IndexType()
+
+    total = 1
+    for d in res_dims:
+        total *= d
 
     # loop-control constants must be index
     c0, c1, c_m, c_n, c_k = (
         arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n, k_dim)
     )
-    # zero-initialised result tensor
-    zero_c = arith.ConstantOp(
-        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * (m * n))
+    # zero-initialised result tensor (full res_type, batch dim included)
+    zero_res = arith.ConstantOp(
+        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * total)
     )
+    setup_ops = [c0, c1, c_m, c_n, c_k, zero_res]
+
+    # The batch loop, when present, is the outermost level: it carries the
+    # full result tensor through iter_args exactly like the i loop does below,
+    # and its induction variable is prepended to every extract/insert index.
+    prefix = []
+    i_init = zero_res.result
+    batch_body = None
+    if batched:
+        c_bdim = arith.ConstantOp.from_int_and_width(batch_dim, idx_ty)
+        setup_ops.append(c_bdim)
+        batch_body = Block(arg_types=[idx_ty, res_type])
+        bi, c_bi = batch_body.args
+        prefix = [bi]
+        i_init = c_bi
 
     # Each loop body block takes (iv, iter_arg); create all three up front so the
     # inner bodies can reference i and j.
@@ -91,9 +117,9 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
     j, c_ij = j_body.args
     k, acc = k_body.args
 
-    # k loop: acc += A[i,k] * B[k,j]
-    a_val = tensor.ExtractOp(lhs, [i, k], elem_ty)
-    b_val = tensor.ExtractOp(rhs, [k, j], elem_ty)
+    # k loop: acc += A[i,k] * B[k,j] (A[b,i,k] * B[b,k,j] when batched)
+    a_val = tensor.ExtractOp(lhs, [*prefix, i, k], elem_ty)
+    b_val = tensor.ExtractOp(rhs, [*prefix, k, j], elem_ty)
     prod = arith.MuliOp(a_val.result, b_val.result)
     new_acc = arith.AddiOp(acc, prod.result)
     k_body.add_ops([a_val, b_val, prod, new_acc, scf.YieldOp(new_acc.result)])
@@ -101,42 +127,71 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
     # j loop: C[i,j] = <k-loop result>, threading the tensor
     zero_acc = arith.ConstantOp.from_int_and_width(0, elem_ty)
     k_loop = scf.ForOp(c0.result, c_k.result, c1.result, [zero_acc.result], Region(k_body))
-    inserted = tensor.InsertOp(k_loop.results[0], c_ij, [i, j])
+    inserted = tensor.InsertOp(k_loop.results[0], c_ij, [*prefix, i, j])
     j_body.add_ops([zero_acc, k_loop, inserted, scf.YieldOp(inserted.result)])
 
     # i loop: yields the tensor produced by the j loop
     j_loop = scf.ForOp(c0.result, c_n.result, c1.result, [c_i], Region(j_body))
     i_body.add_ops([j_loop, scf.YieldOp(j_loop.results[0])])
-    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [zero_c.result], Region(i_body))
+    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [i_init], Region(i_body))
 
-    return [c0, c1, c_m, c_n, c_k, zero_c, i_loop], i_loop.results[0]
+    if batched:
+        batch_body.add_ops([i_loop, scf.YieldOp(i_loop.results[0])])
+        batch_loop = scf.ForOp(
+            c0.result, c_bdim.result, c1.result, [zero_res.result], Region(batch_body)
+        )
+        return [*setup_ops, batch_loop], batch_loop.results[0]
+
+    return [*setup_ops, i_loop], i_loop.results[0]
 
 
 # -----------------------------------------------------------------------------
 #  Tensor elementwise lowering helper (add/sub/mul/relu_tensor share this)
 # -----------------------------------------------------------------------------
 def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compute):
-    """Build a 2-deep, value-semantics scf.for nest applying `compute` element-wise
-    over rank-2 tensor operand(s), producing a new tensor of res_type.
-
-    Structurally identical to _build_matmul_nest's i/j loops (same value-semantics
-    tensor threading via iter_args) but with no k-reduction -- this is a map, not
-    an accumulate, so two loop levels are enough.
+    """Build a value-semantics scf.for nest applying `compute` element-wise over
+    tensor operand(s), producing a new tensor of res_type: i/j loops (2 levels)
+    when res_type is rank-2, or an outer batch loop wrapping the same i/j
+    loops (3 levels) when res_type is rank-3. This is a map, not an
+    accumulate, so no k-reduction level is needed either way.
 
     `operands` is [lhs] for a unary op (relu) or [lhs, rhs] for a binary one.
     `compute(a_val, b_val_or_None) -> (extra_ops, result_ssa_value)` builds the
-    per-element operation; callers differ only in this closure.
+    per-element operation; callers differ only in this closure. Every
+    extract/insert index list is prefixed with the batch induction variable
+    when a batch dim is present, and is just [i,j] otherwise.
     """
-    m, n = (_as_int(d) for d in res_type.shape)
+    res_dims = [_as_int(d) for d in res_type.shape]
+    batched = len(res_dims) == 3
+    batch_dim, m, n = (res_dims if batched else (None, *res_dims))
     elem_ty = res_type.element_type
     idx_ty = builtin.IndexType()
+
+    total = 1
+    for d in res_dims:
+        total *= d
 
     c0, c1, c_m, c_n = (
         arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n)
     )
     zero_res = arith.ConstantOp(
-        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * (m * n))
+        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * total)
     )
+    setup_ops = [c0, c1, c_m, c_n, zero_res]
+
+    # The batch loop, when present, is the outermost level: it carries the
+    # full result tensor through iter_args exactly like the i loop does below,
+    # and its induction variable is prepended to every extract/insert index.
+    prefix = []
+    i_init = zero_res.result
+    batch_body = None
+    if batched:
+        c_bdim = arith.ConstantOp.from_int_and_width(batch_dim, idx_ty)
+        setup_ops.append(c_bdim)
+        batch_body = Block(arg_types=[idx_ty, res_type])
+        bi, c_bi = batch_body.args
+        prefix = [bi]
+        i_init = c_bi
 
     # Both loop bodies created up front so the inner one can reference i/j.
     i_body = Block(arg_types=[idx_ty, res_type])
@@ -144,23 +199,30 @@ def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compu
     i, c_i = i_body.args
     j, c_ij = j_body.args
 
-    extract_ops = [tensor.ExtractOp(operands[0], [i, j], elem_ty)]
+    extract_ops = [tensor.ExtractOp(operands[0], [*prefix, i, j], elem_ty)]
     b_val = None
     if len(operands) == 2:
-        b_extract = tensor.ExtractOp(operands[1], [i, j], elem_ty)
+        b_extract = tensor.ExtractOp(operands[1], [*prefix, i, j], elem_ty)
         extract_ops.append(b_extract)
         b_val = b_extract.result
 
     compute_ops, result_val = compute(extract_ops[0].result, b_val)
 
-    inserted = tensor.InsertOp(result_val, c_ij, [i, j])
+    inserted = tensor.InsertOp(result_val, c_ij, [*prefix, i, j])
     j_body.add_ops([*extract_ops, *compute_ops, inserted, scf.YieldOp(inserted.result)])
 
     j_loop = scf.ForOp(c0.result, c_n.result, c1.result, [c_i], Region(j_body))
     i_body.add_ops([j_loop, scf.YieldOp(j_loop.results[0])])
-    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [zero_res.result], Region(i_body))
+    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [i_init], Region(i_body))
 
-    return [c0, c1, c_m, c_n, zero_res, i_loop], i_loop.results[0]
+    if batched:
+        batch_body.add_ops([i_loop, scf.YieldOp(i_loop.results[0])])
+        batch_loop = scf.ForOp(
+            c0.result, c_bdim.result, c1.result, [zero_res.result], Region(batch_body)
+        )
+        return [*setup_ops, batch_loop], batch_loop.results[0]
+
+    return [*setup_ops, i_loop], i_loop.results[0]
 
 
 # -----------------------------------------------------------------------------

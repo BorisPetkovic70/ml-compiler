@@ -369,3 +369,204 @@ def test_chained_matmul_then_relu_tensor_lowering():
     assert relu_extract.tensor is matmul_top_loop.results[0]
     assert ret.operands[0] is relu_top_loop.results[0]
     assert ret.operands[0] is not matmul_top_loop.results[0]  # returns relu's result, not matmul's
+
+
+# ---------------- batched (rank-3) tensor ops: one extra outer loop ----------------
+
+# B, M, K, N all distinct so a swapped dimension anywhere in the nest can't hide.
+_B, _BM, _BK, _BN = 2, 3, 4, 5
+
+
+def _batched_matmul_module():
+    """hc.matmul on two rank-3 (batched) tensor block args; returns (module, A, B)."""
+    captured = {}
+
+    def body(args):
+        a, b = args
+        captured["a"], captured["b"] = a, b
+        op = HCMatmul(operands=[a, b], result_types=[tensor_ty(_B, _BM, _BN)])
+        return [op], op.results[0]
+
+    m = build_module([tensor_ty(_B, _BM, _BK), tensor_ty(_B, _BK, _BN)], body)
+    return m, captured["a"], captured["b"]
+
+
+def test_batched_matmul_lowers_to_four_deep_scf_for_nest():
+    m, _, _ = _batched_matmul_module()
+    lower(m)
+    names = entry_op_names(m)
+    assert not any(n.startswith("hc.") for n in names)
+    assert names.count("scf.for") == 1  # one top-level loop (batch); the rest are nested
+
+    batch_loop, i_loop, j_loop, k_loop = find_ops(m, "scf.for")
+    assert len(find_ops(m, "scf.for")) == 4
+    assert k_loop.parent_op() is j_loop
+    assert j_loop.parent_op() is i_loop
+    assert i_loop.parent_op() is batch_loop
+    assert batch_loop.parent_op().name == "func.func"
+
+    assert len(find_ops(m, "tensor.extract")) == 2
+    assert len(find_ops(m, "tensor.insert")) == 1
+    assert len(find_ops(m, "arith.muli")) == 1
+    assert len(find_ops(m, "arith.addi")) == 1
+
+
+def test_batched_matmul_nest_bounds_and_wiring():
+    m, a, b = _batched_matmul_module()
+    lower(m)
+    batch_loop, i_loop, j_loop, k_loop = find_ops(m, "scf.for")
+    bi, c_bi = batch_loop.body.block.args
+    i, c_i = i_loop.body.block.args
+    j, c_ij = j_loop.body.block.args
+    k, acc = k_loop.body.block.args
+
+    # trip counts: batch over B, i over M, j over N, k over K
+    assert [_index_const_value(l.ub) for l in (batch_loop, i_loop, j_loop, k_loop)] == \
+        [_B, _BM, _BN, _BK]
+    assert all(_index_const_value(l.lb) == 0 and _index_const_value(l.step) == 1
+               for l in (batch_loop, i_loop, j_loop, k_loop))
+
+    # batch/i/j all thread the full BxMxN tensor, k threads a scalar accumulator
+    assert c_bi.type == c_i.type == c_ij.type == tensor_ty(_B, _BM, _BN)
+    assert acc.type == i32
+
+    # result tensor starts as dense zeros, at the batch loop (the outermost level)
+    init = batch_loop.iter_args[0].owner
+    assert init.name == "arith.constant"
+    assert init.result.type == tensor_ty(_B, _BM, _BN)
+    assert list(init.value.get_values()) == [0] * (_B * _BM * _BN)
+    assert i_loop.iter_args[0] is c_bi  # i loop picks up the batch loop's running tensor
+
+    # A[b,i,k] * B[b,k,j], accumulated into acc
+    a_ex, b_ex = find_ops(m, "tensor.extract")
+    assert a_ex.tensor is a and list(a_ex.indices) == [bi, i, k]
+    assert b_ex.tensor is b and list(b_ex.indices) == [bi, k, j]
+    (mul,) = find_ops(m, "arith.muli")
+    assert list(mul.operands) == [a_ex.result, b_ex.result]
+    (add,) = find_ops(m, "arith.addi")
+    assert list(add.operands) == [acc, mul.result]
+
+    # C[b,i,j] = k-loop result, into the j loop's tensor iter_arg
+    (ins,) = find_ops(m, "tensor.insert")
+    assert ins.scalar is k_loop.results[0]
+    assert ins.dest is c_ij
+    assert list(ins.indices) == [bi, i, j]
+
+    # loops chain the tensor outward, and the function returns the batch loop
+    assert j_loop.iter_args[0] is c_i
+    (ret,) = find_ops(m, "func.return")
+    assert ret.operands[0] is batch_loop.results[0]
+
+
+def test_batched_matmul_lowering_survives_fold_and_dce():
+    m, _, _ = _batched_matmul_module()
+    lower(m, fold=True, dce=True)
+    assert len(find_ops(m, "scf.for")) == 4
+    assert len(find_ops(m, "tensor.extract")) == 2
+    assert len(find_ops(m, "tensor.insert")) == 1
+    assert not any(n.startswith("hc.") for n in entry_op_names(m))
+
+
+def _batched_tensor_binop_module(op_cls):
+    """op_cls(A, B) -> C, all tensor<_Bx_BMx_BNxi32>; returns (module, A, B)."""
+    captured = {}
+
+    def body(args):
+        a, b = args
+        captured["a"], captured["b"] = a, b
+        op = op_cls(operands=[a, b], result_types=[tensor_ty(_B, _BM, _BN)])
+        return [op], op.results[0]
+
+    m = build_module([tensor_ty(_B, _BM, _BN), tensor_ty(_B, _BM, _BN)], body)
+    return m, captured["a"], captured["b"]
+
+
+def _batched_tensor_relu_module():
+    captured = {}
+
+    def body(args):
+        (x,) = args
+        captured["x"] = x
+        op = HCReluTensor(operands=[x], result_types=[tensor_ty(_B, _BM, _BN)])
+        return [op], op.results[0]
+
+    m = build_module([tensor_ty(_B, _BM, _BN)], body)
+    return m, captured["x"]
+
+
+@pytest.mark.parametrize("op_cls,expected", [
+    (HCAddTensor, "arith.addi"), (HCSubTensor, "arith.subi"), (HCMulTensor, "arith.muli"),
+])
+def test_batched_tensor_binop_lowers_to_three_deep_scf_for_nest(op_cls, expected):
+    m, _, _ = _batched_tensor_binop_module(op_cls)
+    lower(m)
+    names = entry_op_names(m)
+    assert not any(n.startswith("hc.") for n in names)
+    assert names.count("scf.for") == 1  # one top-level loop (batch); the rest are nested
+
+    batch_loop, i_loop, j_loop = find_ops(m, "scf.for")
+    assert len(find_ops(m, "scf.for")) == 3
+    assert i_loop.parent_op() is batch_loop
+    assert j_loop.parent_op() is i_loop
+    assert batch_loop.parent_op().name == "func.func"
+
+    assert len(find_ops(m, "tensor.extract")) == 2
+    assert len(find_ops(m, "tensor.insert")) == 1
+    assert len(find_ops(m, expected)) == 1
+
+
+def test_batched_relu_tensor_lowers_to_three_deep_scf_for_nest_with_maxsi():
+    m, _ = _batched_tensor_relu_module()
+    lower(m)
+    names = entry_op_names(m)
+    assert not any(n.startswith("hc.") for n in names)
+    assert names.count("scf.for") == 1
+
+    batch_loop, i_loop, j_loop = find_ops(m, "scf.for")
+    assert i_loop.parent_op() is batch_loop
+    assert j_loop.parent_op() is i_loop
+    assert batch_loop.parent_op().name == "func.func"
+
+    assert len(find_ops(m, "tensor.extract")) == 1
+    assert len(find_ops(m, "tensor.insert")) == 1
+    assert len(find_ops(m, "arith.maxsi")) == 1
+
+
+def test_batched_tensor_binop_nest_wiring():
+    m, a, b = _batched_tensor_binop_module(HCAddTensor)
+    lower(m)
+    batch_loop, i_loop, j_loop = find_ops(m, "scf.for")
+    bi, c_bi = batch_loop.body.block.args
+    i, c_i = i_loop.body.block.args
+    j, c_ij = j_loop.body.block.args
+
+    assert [_index_const_value(l.ub) for l in (batch_loop, i_loop, j_loop)] == \
+        [_B, _BM, _BN]
+    assert all(_index_const_value(l.lb) == 0 and _index_const_value(l.step) == 1
+               for l in (batch_loop, i_loop, j_loop))
+    assert c_bi.type == c_i.type == c_ij.type == tensor_ty(_B, _BM, _BN)
+
+    a_ex, b_ex = find_ops(m, "tensor.extract")
+    assert a_ex.tensor is a and list(a_ex.indices) == [bi, i, j]
+    assert b_ex.tensor is b and list(b_ex.indices) == [bi, i, j]
+
+    (ins,) = find_ops(m, "tensor.insert")
+    assert ins.dest is c_ij
+    assert list(ins.indices) == [bi, i, j]
+
+    assert i_loop.iter_args[0] is c_bi
+    assert j_loop.iter_args[0] is c_i
+    (ret,) = find_ops(m, "func.return")
+    assert ret.operands[0] is batch_loop.results[0]
+
+
+@pytest.mark.parametrize("op_cls", [HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor])
+def test_batched_tensor_binop_lowering_survives_fold_and_dce(op_cls):
+    if op_cls is HCReluTensor:
+        m, _ = _batched_tensor_relu_module()
+    else:
+        m, _, _ = _batched_tensor_binop_module(op_cls)
+    lower(m, fold=True, dce=True)
+    assert len(find_ops(m, "scf.for")) == 3
+    assert len(find_ops(m, "tensor.insert")) == 1
+    assert not any(n.startswith("hc.") for n in entry_op_names(m))

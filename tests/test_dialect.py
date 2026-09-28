@@ -173,6 +173,34 @@ def test_tensor_binop_rejects_mismatched_result_type(op_cls):
         op.verify()
 
 
+@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+def test_tensor_binop_constructs_batched(op_cls):
+    blk = Block(arg_types=[tensor_ty(2, 3, 4), tensor_ty(2, 3, 4)])
+    a, b = blk.args
+    op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3, 4)])
+    op.verify()
+
+
+@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+def test_tensor_binop_rejects_mismatched_batch_dim(op_cls):
+    blk = Block(arg_types=[tensor_ty(2, 3, 4), tensor_ty(5, 3, 4)])
+    a, b = blk.args
+    op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3, 4)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+def test_tensor_binop_rejects_rank_4_operand(op_cls):
+    blk = Block(arg_types=[
+        TensorType(IntegerType(32), [2, 2, 3, 4]), tensor_ty(2, 3, 4),
+    ])
+    a, b = blk.args
+    op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3, 4)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
 def test_relu_tensor_constructs():
     blk = Block(arg_types=[tensor_ty(2, 3)])
     (x,) = blk.args
@@ -192,6 +220,23 @@ def test_relu_tensor_rejects_result_type_mismatch():
     blk = Block(arg_types=[tensor_ty(2, 3)])
     (x,) = blk.args
     op = HCReluTensor(operands=[x], result_types=[tensor_ty(2, 4)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_relu_tensor_constructs_batched():
+    blk = Block(arg_types=[tensor_ty(2, 3, 4)])
+    (x,) = blk.args
+    op = HCReluTensor(operands=[x], result_types=[tensor_ty(2, 3, 4)])
+    op.verify()
+
+
+def test_relu_tensor_rejects_rank_4_operand():
+    blk = Block(arg_types=[TensorType(IntegerType(32), [2, 2, 3, 4])])
+    (x,) = blk.args
+    op = HCReluTensor(
+        operands=[x], result_types=[TensorType(IntegerType(32), [2, 2, 3, 4])]
+    )
     with pytest.raises(Exception):
         op.verify()
 
@@ -234,5 +279,40 @@ def test_matmul_rejects_mismatched_element_type():
     ])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_constructs_batched():
+    blk = Block(arg_types=[tensor_ty(2, 4, 6), tensor_ty(2, 6, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
+    op.verify()
+
+
+def test_matmul_rejects_mismatched_batch_dim():
+    blk = Block(arg_types=[tensor_ty(2, 4, 6), tensor_ty(3, 6, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_rejects_mismatched_ranks():
+    """lhs is rank-2, rhs is rank-3 -- ambiguous whether the whole op is
+    batched, so this is rejected rather than guessed at."""
+    blk = Block(arg_types=[tensor_ty(4, 6), tensor_ty(2, 6, 8)])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
+    with pytest.raises(Exception):
+        op.verify()
+
+
+def test_matmul_rejects_rank_4_operand():
+    blk = Block(arg_types=[
+        TensorType(IntegerType(32), [1, 2, 4, 6]), tensor_ty(2, 6, 8),
+    ])
+    a, b = blk.args
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
     with pytest.raises(Exception):
         op.verify()

@@ -176,6 +176,14 @@ def _matmul(a: list, b: list) -> list:
         raise RuntimeError("matmul: inner dimensions do not agree")
     return [[sum(row[x] * b[x][j] for x in range(k)) for j in range(n)] for row in a]
 
+
+def _batched_matmul(a: list, b: list) -> list:
+    """Reference (BxMxK) @ (BxKxN) -> (BxMxN): _matmul applied per batch slice,
+    deliberately independent of the lowering, same as _matmul itself."""
+    if len(a) != len(b):
+        raise RuntimeError("matmul: batch dimensions do not agree")
+    return [_matmul(a_slice, b_slice) for a_slice, b_slice in zip(a, b)]
+
 # -----------------------------
 # Interpreter
 # -----------------------------
@@ -254,7 +262,8 @@ class Interpreter:
 
             if name == "hc.matmul":
                 a, b = op.operands
-                self._set(op.results[0], _matmul(self._get(a), self._get(b)))
+                matmul = _batched_matmul if len(a.type.shape) == 3 else _matmul
+                self._set(op.results[0], matmul(self._get(a), self._get(b)))
                 continue
 
             # --- tensor ops (value semantics: insert returns a new tensor) ---

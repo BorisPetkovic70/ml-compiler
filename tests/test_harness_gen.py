@@ -166,12 +166,27 @@ def test_refuses_memref_args_with_a_scalar_result():
         generate_harness_c(m, "my_func")
 
 
-def test_refuses_rank_3_memref():
+def test_refuses_rank_4_memref():
     def build(args):
         return [], args[0]
-    m = _module_with_signature([_memref_ty(2, 2, 2)], build)
-    with pytest.raises(RuntimeError, match="rank-1 and rank-2"):
+    m = _module_with_signature([_memref_ty(2, 2, 2, 2)], build)
+    with pytest.raises(RuntimeError, match="rank-1, rank-2, and rank-3"):
         generate_harness_c(m, "my_func")
+
+
+def test_rank_3_batched_memref_result_prints_with_two_wrapping_loops():
+    """A batched (rank-3) result gets one more wrapping for-loop than rank-2:
+    dims 0 and 1 each wrap with a loop that prints '[' on entry and ']' on
+    exit, dim 2 is the flat comma-separated printf loop."""
+    def build(args):
+        return [], args[0]
+    m = _module_with_signature([_memref_ty(2, 3, 4)], build)
+    src = generate_harness_c(m, "my_func")
+    assert "int64_t sizes[3];" in src
+    assert "for (int64_t i0 = 0; i0 < result.sizes[0]; i0++) {" in src
+    assert "for (int64_t i1 = 0; i1 < result.sizes[1]; i1++) {" in src
+    assert "for (int64_t i2 = 0; i2 < result.sizes[2]; i2++)" in src
+    assert "result.strides[2]" in src
 
 
 def test_refuses_unsupported_element_type():

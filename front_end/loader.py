@@ -1,17 +1,18 @@
 """ONNX -> hc.* module: one loader, dispatching on declared/observed shape.
 
 Each ONNX graph *input*'s hc type is decided once, from its declared shape alone
-(_type_from_value_info: rank-0 -> i32, rank-2 -> TensorType, else -> VectorType).
-Each *node* then picks its concrete hc.* op class (scalar vs. *_vec vs. *_tensor
-vs. matmul) from the operand types it actually sees at that point in the graph --
-not from the node's own declared shape, since ONNX doesn't attach one to
-intermediate values the way it does to graph inputs.
+(_type_from_value_info: rank-0 -> i32, rank-1 -> VectorType, rank-2 or rank-3
+(batched) -> TensorType). Each *node* then picks its concrete hc.* op class
+(scalar vs. *_vec vs. *_tensor vs. matmul) from the operand types it actually
+sees at that point in the graph -- not from the node's own declared shape,
+since ONNX doesn't attach one to intermediate values the way it does to graph
+inputs.
 
 ONNX *initializers*/`Constant` nodes go through a separate function,
-_const_op_from_tensor, deliberately mirroring the same rank-2 rule -- a constant
-and a graph input of the same shape must produce the same hc type, or a
-downstream op (hc.matmul) would see mismatched operand types depending on
-whether one operand came from an initializer or a runtime input.
+_const_op_from_tensor, mirroring the same rank rule -- a constant and a graph
+input of the same shape must produce the same hc type, or a downstream op
+(hc.matmul) would see mismatched operand types depending on whether one
+operand came from an initializer or a runtime input.
 
 See docs/DESIGN.md Section 1 for why this dispatch happens once, in this file,
 rather than being re-derived at every consumer downstream.
@@ -43,22 +44,24 @@ def _vec_type_from_shape(shape) -> builtin.VectorType:
 
 def _type_from_value_info(value_info):
     """i32 for a rank-0 (scalar) ONNX input, VectorType for rank-1, TensorType
-    for rank-2 (matmul operands)."""
+    for rank-2 (matmul/elementwise operands) or rank-3 (the same, with a
+    leading batch dim)."""
     dims = [d.dim_value for d in value_info.type.tensor_type.shape.dim]
     if not dims:
         return i32
-    if len(dims) == 2:
+    if len(dims) in (2, 3):
         return builtin.TensorType(i32, dims)
     return _vec_type_from_shape(dims)
 
 
 def _const_op_from_tensor(tensor_proto) -> arith.ConstantOp:
     """arith.constant from an ONNX tensor: scalar i32 if rank-0, dense tensor if
-    rank-2 (matmul operands), dense vector otherwise."""
+    rank-2 or rank-3 (matmul/elementwise operands, the latter batched), dense
+    vector otherwise."""
     arr = onnx.numpy_helper.to_array(tensor_proto)
     if arr.shape == ():
         return arith.ConstantOp.from_int_and_width(int(arr), 32)
-    if len(arr.shape) == 2:
+    if len(arr.shape) in (2, 3):
         ty = builtin.TensorType(i32, list(arr.shape))
     else:
         ty = _vec_type_from_shape(arr.shape)
@@ -178,9 +181,11 @@ def import_onnx_to_hc_module(
         if node.op_type == "MatMul":
             a = get(node.input[0])
             b = get(node.input[1])
-            m = _dim_as_int(list(a.type.shape)[0])
-            n = _dim_as_int(list(b.type.shape)[1])
-            res_ty = builtin.TensorType(i32, [m, n])
+            a_dims = [_dim_as_int(d) for d in a.type.shape]
+            b_dims = [_dim_as_int(d) for d in b.type.shape]
+            batch, m = a_dims[:-2], a_dims[-2]
+            n = b_dims[-1]
+            res_ty = builtin.TensorType(i32, batch + [m, n])
             hc = HCMatmul(operands=[a, b], result_types=[res_ty])
             ops.append(hc)
             env[node.output[0]] = hc.results[0]

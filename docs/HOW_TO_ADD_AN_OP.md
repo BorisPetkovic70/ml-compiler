@@ -16,14 +16,14 @@ verifier — see DESIGN.md Section 2):
 ```python
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
-    """2D matrix multiply: (MxK) * (KxN) -> (MxN)"""
+    """(MxK) * (KxN) -> (MxN), or batched (BxMxK) * (BxKxN) -> (BxMxN)"""
     name = "hc.matmul"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        ...  # rank-2 check, element-type agreement, MxK · KxN -> MxN
+        ...  # rank-2-or-3 check, same-rank check, element-type agreement, MxK · KxN -> MxN
 ```
 
 **Register it in the `HiCompiler` tuple** at the bottom of the file — an op that isn't

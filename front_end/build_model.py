@@ -12,6 +12,7 @@ MODEL_PATH = os.path.join(BASE_DIR, "score_model.onnx")
 VEC_AFFINE_RELU_MODEL_PATH = os.path.join(BASE_DIR, "vec_affine_relu.onnx")
 MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "matmul.onnx")
 CHAINED_TENSOR_MODEL_PATH = os.path.join(BASE_DIR, "chained_tensor_math.onnx")
+BATCHED_MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "batched_matmul.onnx")
 
 
 def build_score_model(path: str = MODEL_PATH):
@@ -230,8 +231,43 @@ def build_chained_tensor_model(path: str = CHAINED_TENSOR_MODEL_PATH, m: int = 4
     print(f"Saved ONNX model to: {path}")
 
 
+def build_batched_matmul_model(
+    path: str = BATCHED_MATMUL_MODEL_PATH, batch: int = 2, m: int = 4, k: int = 4, n: int = 4
+):
+    """Build a single-node ONNX model: C = A @ B, batched over a leading dim,
+    A:(BxMxK), B:(BxKxN), C:(BxMxN)."""
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    a = helper.make_tensor_value_info("a", TensorProto.INT32, [batch, m, k])
+    b = helper.make_tensor_value_info("b", TensorProto.INT32, [batch, k, n])
+    c = helper.make_tensor_value_info("c", TensorProto.INT32, [batch, m, n])
+
+    nodes = [
+        helper.make_node("MatMul", ["a", "b"], ["c"], name="batched_matmul"),
+    ]
+
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="BatchedMatmulGraph",
+        inputs=[a, b],
+        outputs=[c],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 13)],
+        producer_name="batched_matmul_builder",
+    )
+
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"Saved ONNX model to: {path}")
+
+
 if __name__ == "__main__":
     build_score_model()
     build_vec_affine_relu_model()
     build_matmul_model()
     build_chained_tensor_model()
+    build_batched_matmul_model()

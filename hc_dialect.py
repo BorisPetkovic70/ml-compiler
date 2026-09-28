@@ -7,8 +7,9 @@ two separate, independently-testable decisions -- see docs/DESIGN.md Section 1.
 VecInt/TensorInt (below) constrain element type only -- neither binds shapes
 across an op's operands. This is why every op with a shape relationship between
 its operands (mismatched-width scalar ops, same-shape vector ops, hc.matmul's
-MxK*KxN->MxN, the tensor elementwise family's exact-shape match) needs its own
-hand-written verify_(): the type system alone cannot express those constraints.
+MxK*KxN->MxN and its batched BxMxK*BxKxN->BxMxN variant, the tensor elementwise
+family's exact-shape match) needs its own hand-written verify_(): the type
+system alone cannot express those constraints.
 See docs/DESIGN.md Section 2 for why scalars, vectors, and tensors are modeled
 as genuinely different op families rather than one polymorphic op per operation.
 
@@ -214,18 +215,31 @@ def _dim(int_attr) -> int:
 
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
-    """2D matrix multiply: (MxK) * (KxN) -> (MxN)"""
+    """(MxK) * (KxN) -> (MxN), or batched (BxMxK) * (BxKxN) -> (BxMxN) with a
+    matching leading batch dim."""
     name = "hc.matmul"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
+        """shape[:-2] is the (possibly empty) batch prefix, shape[-2:] is the
+        actual MxK/KxN/MxN pair: each operand must be rank-2 or rank-3, all
+        three operands must share the same rank, and when a batch prefix is
+        present it must match across lhs/rhs/res."""
         lhs_t, rhs_t, res_t = self.lhs.type, self.rhs.type, self.res.type
 
         for label, t in (("lhs", lhs_t), ("rhs", rhs_t), ("res", res_t)):
-            if len(t.shape) != 2:
-                raise ValueError(f"hc.matmul: {label} must be a rank-2 tensor, got {t}")
+            if len(t.shape) not in (2, 3):
+                raise ValueError(
+                    f"hc.matmul: {label} must be rank-2, or rank-3 with a leading "
+                    f"batch dim, got {t}"
+                )
+        if not len(lhs_t.shape) == len(rhs_t.shape) == len(res_t.shape):
+            raise ValueError(
+                f"hc.matmul: lhs/rhs/res must all be the same rank, got "
+                f"{len(lhs_t.shape)}/{len(rhs_t.shape)}/{len(res_t.shape)}"
+            )
 
         if lhs_t.element_type != rhs_t.element_type or lhs_t.element_type != res_t.element_type:
             raise ValueError(
@@ -233,10 +247,19 @@ class HCMatmul(IRDLOperation):
                 f"lhs={lhs_t.element_type}, rhs={rhs_t.element_type}, res={res_t.element_type}"
             )
 
-        m, k = _dim(list(lhs_t.shape)[0]), _dim(list(lhs_t.shape)[1])
-        k2, n = _dim(list(rhs_t.shape)[0]), _dim(list(rhs_t.shape)[1])
-        rm, rn = _dim(list(res_t.shape)[0]), _dim(list(res_t.shape)[1])
+        lhs_dims = [_dim(d) for d in lhs_t.shape]
+        rhs_dims = [_dim(d) for d in rhs_t.shape]
+        res_dims = [_dim(d) for d in res_t.shape]
+        lhs_batch, rhs_batch, res_batch = lhs_dims[:-2], rhs_dims[:-2], res_dims[:-2]
+        m, k = lhs_dims[-2:]
+        k2, n = rhs_dims[-2:]
+        rm, rn = res_dims[-2:]
 
+        if lhs_batch != rhs_batch or lhs_batch != res_batch:
+            raise ValueError(
+                f"hc.matmul: batch dimensions must match across lhs/rhs/res, got "
+                f"lhs={lhs_batch}, rhs={rhs_batch}, res={res_batch}"
+            )
         if k != k2:
             raise ValueError(f"hc.matmul: inner dimensions must agree, got lhs K={k} vs rhs K={k2}")
         if (rm, rn) != (m, n):
@@ -247,12 +270,18 @@ class HCMatmul(IRDLOperation):
 
 def _verify_bin_same_tensor_type(op: IRDLOperation):
     """Shared verify_() for tensor⊙tensor elementwise ops: unlike hc.matmul (whose
-    operand shapes legitimately differ), lhs/rhs/res must be the exact same rank-2
-    tensor type -- TensorInt alone doesn't bind shape across operands (see module
-    docstring), so this still needs a hand-written check."""
+    operand shapes legitimately differ), lhs/rhs/res must be the exact same
+    tensor type -- rank-2, or rank-3 with a leading batch dim, and in the
+    rank-3 case the exact type-equality check below requires the batch dim to
+    match along with the rest of the shape. TensorInt alone doesn't bind shape
+    across operands (see module docstring), so this still needs a hand-written
+    check."""
     lhs_t, rhs_t, res_t = op.lhs.type, op.rhs.type, op.res.type
-    if len(lhs_t.shape) != 2:
-        raise ValueError(f"{op.name}: operands must be rank-2 tensors, got {lhs_t}")
+    if len(lhs_t.shape) not in (2, 3):
+        raise ValueError(
+            f"{op.name}: operands must be rank-2, or rank-3 with a leading batch "
+            f"dim, got {lhs_t}"
+        )
     if lhs_t != rhs_t:
         raise ValueError(
             f"{op.name}: lhs and rhs must have the same tensor type, got {lhs_t} vs {rhs_t}"
@@ -303,14 +332,18 @@ class HCMulTensor(IRDLOperation):
 
 @irdl_op_definition
 class HCReluTensor(IRDLOperation):
-    """ReLU over a rank-2 tensor: max(x, 0) element-wise"""
+    """ReLU over a tensor: max(x, 0) element-wise. Rank-2, or rank-3 with a
+    leading batch dim."""
     name = "hc.relu_tensor"
     x = operand_def(TensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        if len(self.x.type.shape) != 2:
-            raise ValueError(f"hc.relu_tensor: operand must be a rank-2 tensor, got {self.x.type}")
+        if len(self.x.type.shape) not in (2, 3):
+            raise ValueError(
+                f"hc.relu_tensor: operand must be rank-2, or rank-3 with a "
+                f"leading batch dim, got {self.x.type}"
+            )
         if self.res.type != self.x.type:
             raise ValueError(
                 f"hc.relu_tensor: result must match operand tensor type, "

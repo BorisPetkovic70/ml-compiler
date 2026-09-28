@@ -97,7 +97,7 @@ Concretely, this is where it applies:
   — but they exist so that a *future*, differently-shaped lowering is caught loudly instead of
   silently miscompiled.
 - **The harness generator** (`back_end/harness_gen.py`) refuses to generate a C harness for a
-  rank-3+ memref, a non-integer element type, a function that takes a memref argument but
+  rank-4+ memref, a non-integer element type, a function that takes a memref argument but
   returns something other than a memref, or a signature that mixes a vector argument with a
   memref one. Each of these is a real, distinct C ABI shape — refusing them means a signature
   the generator doesn't understand produces an error at generation time, not a harness that
@@ -164,10 +164,11 @@ generated *after* the middle end runs, not before — `hc_main.py` reflects this
 
 ## 7. Known limits, and why each one is a limit rather than a bug
 
-- **Only rank-1 and rank-2 shapes are supported** anywhere memref/tensor types appear (the
-  dialect's own verifiers, the harness generator, bufferization). There is currently no
-  workload that needs rank-3+, and generalizing the loop-nest-building and descriptor-struct
-  code without a concrete test case to validate against would be speculative.
+- **Only rank-1, rank-2, and rank-3 (a single leading batch dim) shapes are supported**
+  anywhere memref/tensor types appear (the dialect's own verifiers, the harness generator,
+  bufferization). There is currently no workload that needs a second batch dimension or
+  rank-4+, and generalizing the loop-nest-building and descriptor-struct code further without
+  a concrete test case to validate against would be speculative.
 - **Only `i32`.** No floating-point element type exists anywhere in the pipeline. This is a
   scope decision, not an oversight — the whole verification chain (interpreter, NumPy
   comparison, C ABI descriptor structs) currently assumes integer arithmetic.
