@@ -58,9 +58,9 @@ build/matmul_run [args...]                   # rerun a compiled model
 - **Sample models:** `score_model` (scalar), `vec_affine_relu` (vector), `matmul`,
   `chained_tensor_math` (ReLU(A@B + C)), `batched_matmul`.
 - **Model argument:** `matmul.onnx` and `build/matmul.onnx` are equivalent; the stem (`matmul`)
-  names every output file. If the file is missing, `hc_main.py` builds it — but only
-  `matmul` and `vec_affine_relu` are recognized by name; **any other missing name silently
-  builds the scalar score model**. Run `build_model.py` first.
+  names every output file. If the file is missing, `hc_main.py` builds it — all five sample
+  models are recognized by name; **any other missing name still silently builds the scalar
+  score model**.
 - **`TOOLCHAIN_BIN_DIR`:** directory holding `mlir-opt`/`mlir-translate`/`llc`. The default in
   `back_end/back_end.sh` is a machine-specific path; override it with the env var.
 - **Executable args:** one integer per scalar, per vector lane, or per buffer element, in argument

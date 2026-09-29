@@ -18,6 +18,8 @@ from front_end.build_model import (
     build_score_model, MODEL_PATH,
     build_vec_affine_relu_model, VEC_AFFINE_RELU_MODEL_PATH,
     build_matmul_model, MATMUL_MODEL_PATH,
+    build_chained_tensor_model, CHAINED_TENSOR_MODEL_PATH,
+    build_batched_matmul_model, BATCHED_MATMUL_MODEL_PATH,
 )
 from front_end.loader import import_onnx_to_hc_module
 
@@ -49,12 +51,13 @@ def _nest(flat: list, dims: list[int]) -> list:
 
 
 def _sample_args_for_entry(module, func_name):
-    """Returns (and prints) interpreter arguments for `func_name`: `31 + i` for
-    scalar argument i, and a flat (vector) or nested (tensor/memref) list
+    """Returns (and prints) interpreter arguments for `func_name`: `10 * (i + 1)`
+    for scalar argument i, and a flat (vector) or nested (tensor/memref) list
     filled with `10*i + k + 1` for shaped argument i.
 
-    Shaped arguments match the generated C harness's defaults; scalar ones do
-    not (the harness uses `10 * (i + 1)`)."""
+    Both formulas match the defaults of the generated C harness
+    (back_end/harness_gen.py), so the interpreter and the compiled executable
+    see the same inputs when run without argv."""
     for top_block in module.body.blocks:
         for op in top_block.ops:
             if isinstance(op, func.FuncOp) and op.sym_name.data == func_name:
@@ -69,7 +72,7 @@ def _sample_args_for_entry(module, func_name):
                         flat = [10 * i + k + 1 for k in range(n)]
                         args.append(_nest(flat, dims) if len(dims) > 1 else flat)
                     else:
-                        args.append(31 + i)
+                        args.append(10 * (i + 1))
                 print(args)
                 return args
     raise RuntimeError(f"Function not found: {func_name}")
@@ -97,10 +100,14 @@ def main():
             model_path = build_dir / model_path.name
             print(f"Model not found, building: {model_path}")
             # Keyed by file name (the *_MODEL_PATH constants are full paths);
-            # any other name builds the score model.
+            # every builder in front_end/build_model.py is listed, and a name
+            # not listed here still falls back to the score model.
             builders = {
+                Path(MODEL_PATH).name: build_score_model,
                 Path(VEC_AFFINE_RELU_MODEL_PATH).name: build_vec_affine_relu_model,
                 Path(MATMUL_MODEL_PATH).name: build_matmul_model,
+                Path(CHAINED_TENSOR_MODEL_PATH).name: build_chained_tensor_model,
+                Path(BATCHED_MATMUL_MODEL_PATH).name: build_batched_matmul_model,
             }
             builders.get(model_path.name, build_score_model)(str(model_path))
 
