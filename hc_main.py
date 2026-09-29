@@ -1,3 +1,10 @@
+"""Driver: `python hc_main.py [model.onnx]`, run from the repository root.
+
+Loads (or builds) the model, writes `build/<stem>_original.mlir`, runs the
+middle end (lowering + bufferization; folding and DCE disabled), writes
+`build/<stem>_lowered.mlir` and `back_end/<stem>_harness.c`, and asserts that
+the interpreter gives the same result before and after the middle end.
+"""
 import copy
 import sys
 from pathlib import Path
@@ -34,8 +41,7 @@ def _dims_of(ty) -> list[int]:
 
 
 def _nest(flat: list, dims: list[int]) -> list:
-    """Row-major flat list -> nested lists, matching the interpreter's tensor/memref
-    representation."""
+    """Row-major flat list -> nested lists of shape `dims`."""
     if len(dims) <= 1:
         return list(flat)
     step = len(flat) // dims[0]
@@ -43,12 +49,12 @@ def _nest(flat: list, dims: list[int]) -> list:
 
 
 def _sample_args_for_entry(module, func_name):
-    """Auto-generate sample inputs matching each block arg's type: an int for scalar
-    (i32) args, a flat list for vector args, a nested list for tensor/memref args.
+    """Returns (and prints) interpreter arguments for `func_name`: `31 + i` for
+    scalar argument i, and a flat (vector) or nested (tensor/memref) list
+    filled with `10*i + k + 1` for shaped argument i.
 
-    Shaped args use the same 10*i + k + 1 formula the generated C harness fills its
-    buffers with, so the interpreted result printed here should match what the
-    compiled binary prints."""
+    Shaped arguments match the generated C harness's defaults; scalar ones do
+    not (the harness uses `10 * (i + 1)`)."""
     for top_block in module.body.blocks:
         for op in top_block.ops:
             if isinstance(op, func.FuncOp) and op.sym_name.data == func_name:
@@ -90,9 +96,8 @@ def main():
         else:
             model_path = build_dir / model_path.name
             print(f"Model not found, building: {model_path}")
-            # Compare file names, not whole paths: the *_MODEL_PATH constants are full
-            # paths (build/<name>.onnx), so comparing them to model_path.name never
-            # matched and every unknown model silently fell back to the score model.
+            # Keyed by file name (the *_MODEL_PATH constants are full paths);
+            # any other name builds the score model.
             builders = {
                 Path(VEC_AFFINE_RELU_MODEL_PATH).name: build_vec_affine_relu_model,
                 Path(MATMUL_MODEL_PATH).name: build_matmul_model,

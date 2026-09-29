@@ -1,38 +1,21 @@
-"""Hand-written bufferization: tensor (value semantics) -> memref (memory semantics).
+"""Tensor -> memref bufferization of lowered IR. The rewrite table,
+ownership rules, and full refusal list are in docs/DESIGN.md Section 4.
 
-Runs on the IR produced by lowering (`tensor.extract`/`tensor.insert`/`scf.for` with
-tensor `iter_args`), and rewrites each function that touches tensors:
+`apply_bufferization` rewrites each tensor-using func.func in place:
+- tensors become memrefs;
+- tensor constants become `memref.alloc` plus a fill loop nest;
+- extract/insert become load/store;
+- tensor `iter_args` are dropped;
+- every allocated buffer that isn't returned is deallocated before
+  `func.return`.
 
-  * tensor function arguments become memref arguments (read-only inputs)
-  * `arith.constant dense<c> : tensor<..>` becomes `memref.alloc` + a store loop nest
-    that fills it with `c`
-  * `tensor.extract %t[idx]`      -> `memref.load  %m[idx]`
-  * `tensor.insert %v into %t[idx]` -> `memref.store %v, %m[idx]`  (in place)
-  * tensor `iter_args` on `scf.for` are dropped -- the loop no longer carries the
-    tensor, because the stores mutate one buffer; scalar `iter_args` (e.g. the k-loop
-    register reduction) are kept
-  * a returned tensor becomes a returned memref (allocated here, ownership passes to
-    the caller); temporaries that are not returned get a `memref.dealloc`
+When an in-place store can't be proven safe, or the IR isn't one of the
+shapes it handles, the pass raises NotImplementedError rather than inserting
+a copy.
 
-Turning "every insert yields a new tensor" into "every store mutates one buffer" is
-only correct when the old tensor value is dead afterwards. The pass therefore
-*proves* that where it matters and refuses (NotImplementedError) otherwise, instead of
-silently producing wrong code:
-
-  * a tensor consumed by an insert or a loop `iter_arg` init must have exactly one use;
-  * inserting into a function argument would mutate the caller's input -> refused;
-  * a loop must yield the same buffer it carries.
-
-Refusing is where a copy (`memref.alloc` + `memref.copy`) would be inserted; that is
-deliberately not implemented yet -- none of these trigger on hc.matmul's own nest, but
-they keep the pass honest about what it hasn't been shown.
-
-Not yet wired into MiddleEndPipeline, and the interpreter can't execute `memref` ops
-yet either -- call `apply_bufferization(module)` directly on an already-lowered module;
-there's no way to run the result through the interpreter until that support exists.
-The function body is rebuilt (clone-and-translate) rather than edited in place:
-`scf.ForOp` can't change its iter_arg/result count in place, and translating from the
-untouched old IR keeps the use-count checks above valid.
+Each function body is rebuilt into a fresh block rather than edited in place,
+because `scf.for` can't change its iter_arg count in place. Reading from the
+untouched old block also keeps use counts accurate for the single-use checks.
 """
 from xdsl.dialects import arith, func, memref, scf
 from xdsl.dialects.builtin import FunctionType, IndexType, MemRefType, ModuleOp, TensorType
@@ -40,7 +23,8 @@ from xdsl.ir import Block, Operation, Region, SSAValue
 
 
 def apply_bufferization(module: ModuleOp) -> None:
-    """Bufferize every function in `module` that uses tensors (in place)."""
+    """Bufferizes, in place, every func.func in `module` that uses tensors;
+    other functions are left untouched."""
     for top_block in module.body.blocks:
         for op in list(top_block.ops):
             if isinstance(op, func.FuncOp) and _uses_tensors(op):
@@ -110,6 +94,9 @@ def _fill_ops(buf: SSAValue, tensor_ty: TensorType, value: int) -> list[Operatio
 #  The pass
 # -----------------------------------------------------------------------------
 class _Bufferizer:
+    """Bufferizes one single-block func.func; `run()` replaces its body and
+    updates its function type."""
+
     def __init__(self, fn: func.FuncOp):
         self.fn = fn
         # old non-tensor SSA value -> new value; also the value_mapper handed to clone()
@@ -169,8 +156,8 @@ class _Bufferizer:
         new_block.add_op(op.clone(value_mapper=self.vmap))
 
     def _buf(self, value: SSAValue) -> SSAValue:
-        # If a future bug lets an unregistered tensor slip through,
-        # this instantly raises a KeyError at the exact point of failure.
+        # KeyError here: a tensor value was reached without first being
+        # mapped to a buffer.
         return self.bufs[value]
 
     # ---- tensor constant -> alloc + fill ---------------------------------------

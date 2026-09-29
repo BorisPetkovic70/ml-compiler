@@ -76,8 +76,8 @@ def test_mul_vec_constant_scalar_lowers_via_broadcast():
 
 
 def test_mul_vec_runtime_scalar_lowers_via_broadcast():
-    """The case that motivated switching from constant-splat to vector.broadcast:
-    the scalar is a function argument, not an arith.constant."""
+    """A scalar function argument (not an arith.constant) lowers through
+    vector.broadcast."""
     def body(args):
         (s,) = args
         v = const_vec([1, 2, 3, 4])
@@ -179,8 +179,9 @@ def test_matmul_lowers_to_three_deep_scf_for_nest():
 
 
 def test_matmul_nest_bounds_and_wiring():
-    """Structural presence can't prove the index wiring; assert on the actual
-    operands. The semantic before/after check lands with the interpreter (M3)."""
+    """Structural presence can't prove the index wiring, so this asserts on the
+    actual loop bounds and extract/insert operands. The semantic check is in
+    test_interpreter.py."""
     m, a, b = _matmul_module()
     lower(m)
     i_loop, j_loop, k_loop = find_ops(m, "scf.for")
@@ -227,7 +228,7 @@ def test_matmul_nest_bounds_and_wiring():
 
 
 def test_matmul_lowering_survives_fold_and_dce():
-    """The default pipeline (lowering + folding + DCE) must leave the nest intact."""
+    """Folding and DCE after lowering leave the matmul nest intact."""
     m, _, _ = _matmul_module()
     lower(m, fold=True, dce=True)
     assert len(find_ops(m, "scf.for")) == 3
@@ -305,8 +306,8 @@ def test_relu_tensor_lowers_to_two_deep_scf_for_nest_with_maxsi():
 
 
 def test_tensor_binop_nest_wiring():
-    """Structural presence can't prove the index wiring; assert on the actual
-    operands, same discipline as the matmul nest's own wiring test."""
+    """Structural presence can't prove the index wiring, so this asserts on the
+    actual extract/insert operands."""
     m, a, b = _tensor_binop_module(HCAddTensor)
     lower(m)
     i_loop, j_loop = find_ops(m, "scf.for")
@@ -344,8 +345,8 @@ def test_tensor_binop_lowering_survives_fold_and_dce(op_cls):
 
 
 def test_chained_matmul_then_relu_tensor_lowering():
-    """hc.matmul feeding hc.relu_tensor: proves the two nests actually chain
-    (the relu nest reads the matmul nest's result), not just coexist."""
+    """hc.matmul feeding hc.relu_tensor: the relu nest reads the matmul nest's
+    result, so the two nests are chained rather than merely coexisting."""
     def body(args):
         a, b = args
         mm = HCMatmul(operands=[a, b], result_types=[tensor_ty(_M, _N)])

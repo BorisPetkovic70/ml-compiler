@@ -1,23 +1,17 @@
-"""Pure-Python interpreter for hc.*/arith.*/vector.*/tensor.*/memref.*/scf.*.
+"""Pure-Python interpreter for the hc, arith, vector, tensor, memref, and scf
+ops this pipeline emits. It is the test suite's correctness oracle
+(docs/DESIGN.md Section 7).
 
-This is the correctness oracle the whole pytest suite is checked against (see
-docs/DESIGN.md Section 5), not a fallback or a toy: every operator is run through
-here both before and after each transform, and that before/after equality is what
-actually proves a lowering correct.
+Values: scalars and `index` values are Python ints; vectors are flat lists;
+tensors and memrefs are row-major nested lists. Tensor ops return copies;
+memref ops mutate in place. An unimplemented op raises RuntimeError.
 
-Value model: scalars are Python ints; vectors are flat lists; tensors and memrefs
-are both row-major nested lists (same representation, opposite semantics -- see
-"Tensor helpers"/"Memref helpers" below and docs/DESIGN.md Section 3).
-
-Known simplifications, not bugs:
-  - `index` and `i32` are not distinguished; both are plain Python ints.
-  - Ints are unbounded (Python's arbitrary precision) -- i32 overflow that would
-    wrap on real hardware simply doesn't happen here.
-  - scf.if only reads the yielded SSA value; it does NOT execute the branch's
-    operations. Harmless today (hc.max/hc.min's lowering -- the only source of
-    scf.if -- yields an already-computed outer value from each branch directly),
-    but would read a stale value if some future op's lowering computed something
-    *inside* a branch rather than merely selecting between two outer values.
+Simplifications:
+- Ints are unbounded, so i32 overflow never wraps.
+- `arith.cmpi` supports only `sgt` and `slt`.
+- `scf.if` returns the taken branch's yielded value without executing the
+  branch's other ops. This is correct for the `hc.max`/`hc.min` lowering,
+  whose branches yield values defined outside the `scf.if`.
 """
 from typing import Any
 from xdsl.ir import Operation, SSAValue
@@ -68,9 +62,7 @@ def _const_value(op: Operation) -> int | None:
 
 
 def _dense_values(op: Operation) -> list[int] | None:
-    """
-    arith.constant dense<...> : vector<Nxi32> -> list[int], else None.
-    """
+    """Flat list[int] of a dense `arith.constant` (vector or tensor), else None."""
     if op.name != "arith.constant":
         return None
     v = getattr(op, "value", None)
@@ -83,11 +75,8 @@ def _dense_values(op: Operation) -> list[int] | None:
 
 
 def _elt_binop(a, b, f):
-    """Apply f element-wise, broadcasting a scalar against a vector/tensor (list,
-    recursing into nested lists for rank-2 tensors). Recursion is what makes this
-    correct for a 2-D tensor rather than doing list concatenation per row -- a
-    non-recursive version would silently do that instead of erroring, so this was
-    verified against a real 2-D case, not assumed."""
+    """Applies f element-wise over nested lists of any depth, broadcasting a
+    scalar against a list."""
     if isinstance(a, list) and isinstance(b, list):
         return [_elt_binop(x, y, f) for x, y in zip(a, b)]
     if isinstance(a, list):
@@ -153,14 +142,14 @@ def _tensor_insert(t: list, indices: list[int], value) -> list:
 # -----------------------------
 # Memref helpers
 #
-# A memref value uses the same nested-list representation as a tensor, but has
-# memory semantics: memref.store mutates its buffer in place -- the direct opposite
-# of _tensor_insert's "return a copy" -- so two SSA values that alias the same
-# buffer both observe a write through it, which is the whole point of bufferizing.
+# A memref value uses the same nested-list representation as a tensor, but
+# memref.store mutates it in place, so every SSA value aliasing the buffer
+# observes the write.
 # -----------------------------
 
 def _memref_store(buf: list, indices: list[int], value) -> None:
-    """Mutate `buf` in place at `indices` (the opposite of _tensor_insert's copy)."""
+    """Writes `value` into `buf` at `indices`, in place, after bounds-checking
+    every index."""
     for i in indices[:-1]:
         _check_index(buf, i)
         buf = buf[i]
@@ -178,8 +167,7 @@ def _matmul(a: list, b: list) -> list:
 
 
 def _batched_matmul(a: list, b: list) -> list:
-    """Reference (BxMxK) @ (BxKxN) -> (BxMxN): _matmul applied per batch slice,
-    deliberately independent of the lowering, same as _matmul itself."""
+    """Reference (BxMxK) @ (BxKxN) -> (BxMxN): `_matmul` per batch slice."""
     if len(a) != len(b):
         raise RuntimeError("matmul: batch dimensions do not agree")
     return [_matmul(a_slice, b_slice) for a_slice, b_slice in zip(a, b)]
@@ -189,6 +177,9 @@ def _batched_matmul(a: list, b: list) -> list:
 # -----------------------------
 
 class Interpreter:
+    """Executes one function. `env` maps id(SSAValue) to the value's Python
+    representation."""
+
     def __init__(self):
         # SSAValue is not always hashable across versions -> use id()
         self.env: dict[int, object] = {}
@@ -201,11 +192,9 @@ class Interpreter:
         self.env[id(v)] = value
 
     def run_block(self, block):
-        """
-        Execute a single basic block (straight-line) up to its terminator.
-        Returns the value of func.return, or -- for a loop body -- the list of
-        values scf.yield yields.
-        """
+        """Executes `block`'s ops in order. Returns the `func.return` operand,
+        or the list of `scf.yield` operands for a loop body. Raises
+        RuntimeError for an unsupported op or a block without a terminator."""
         for op in list(block.ops):
             name = op.name
 
@@ -353,7 +342,7 @@ class Interpreter:
 
                 pred = op.predicate.value.data
 
-                # In xDSL: sgt == 4; lgt == 2
+                # arith.cmpi predicate encoding: slt == 2, sgt == 4
                 if pred == 4:  # signed greater-than
                     result = 1 if lhs > rhs else 0
                 elif pred == 2:  # signed less-than
@@ -417,30 +406,30 @@ class Interpreter:
         raise RuntimeError("Block ended without func.return")
 
     def run_module(self, module,  args: list[int], func_name: str = "my_func") -> int:
-        """ Execute a single function from the given module using the interpreter.
+        """ Execute the same function multiple times with different argument sets.
 
-        This method locates `func.func @func_name` inside the module, binds the
-        provided runtime arguments to the function's entry block arguments,
-        and interprets the block sequentially until a `func.return` operation
-        is encountered.
+        This method repeatedly calls `run_module`, once for each list of
+        arguments in `batch_args`, effectively simulating batch execution.
+        Each inner list represents the input arguments for one function call.
 
         Args:
             module:
                 The xDSL ModuleOp containing the function to execute.
 
-            args:
-                A list of values bound to the function's input arguments (entry
-                block arguments): an int for a scalar, a list for a vector, a
-                nested list (row-major) for a tensor. The number of elements
-                must match the number of function parameters.
+            batch_args:
+                A list of argument lists. Each inner list contains the integer
+                values that will be passed as inputs to one invocation of the
+                function.
 
             func_name:
                 The name of the function to execute. Defaults to "my_func".
 
-        Returns:
-            The value returned by `func.return`: an int, a list (vector), or a
-            nested list (tensor).
-        """
+        Returns:            
+            list[int]:
+                A list containing the return value of each function invocation,
+                in the same order as `batch_args`.
+      """
+
         # module.body.blocks[0].ops usually contains top-level ops
         for top_block in module.body.blocks:
             for op in list(top_block.ops):
@@ -476,29 +465,8 @@ class Interpreter:
         batch_args: list[list[int]],
         func_name: str = "my_func"
     ) -> list[int]:
-        """ Execute the same function multiple times with different argument sets.
-
-        This method repeatedly calls `run_module`, once for each list of
-        arguments in `batch_args`, effectively simulating batch execution.
-        Each inner list represents the input arguments for one function call.
-
-        Args:
-            module:
-                The xDSL ModuleOp containing the function to execute.
-
-            batch_args:
-                A list of argument lists. Each inner list contains the integer
-                values that will be passed as inputs to one invocation of the
-                function.
-
-            func_name:
-                The name of the function to execute. Defaults to "my_func".
-
-        Returns:
-            list[int]:
-                A list containing the return value of each function invocation,
-                in the same order as `batch_args`.
-        """
+        """Calls `run_module` once per argument list in `batch_args`, with a
+        fresh environment each time, and returns the results in order."""
         results = []
 
         for args in batch_args:
@@ -510,10 +478,8 @@ class Interpreter:
         return results
 
     def _eval_scf_if_region_yield(self, region) -> int:
-        """
-        Simplified: Assume region has 1 block and the last op is scf.yield with 1 operand.
-        We ignore everything else in the region and just read the yielded SSA value.
-        """
+        """Returns the value yielded by `region`'s single-operand `scf.yield`
+        without executing the region's other ops (see module docstring)."""
         block = list(region.blocks)[0]
         last = list(block.ops)[-1]
         if last.name != "scf.yield" or len(last.operands) != 1:

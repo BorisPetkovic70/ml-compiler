@@ -1,22 +1,14 @@
-"""The hc dialect: ONNX-shaped operations over scalars, vectors, and tensors.
+"""The `hc` dialect: ONNX-shaped integer ops, one family each for scalars,
+vectors (`*_vec`), and tensors (`*_tensor`, `hc.matmul`). See docs/DESIGN.md
+Sections 1-2.
 
-Sits above arith./scf./vector./tensor. specifically so "what the model computes"
-(this file) and "how that computation becomes loops and memory" (middle_end/) are
-two separate, independently-testable decisions -- see docs/DESIGN.md Section 1.
+`VecInt`/`TensorInt` constrain only the element type. Every rule relating the
+types or shapes of an op's operands and result is enforced by that op's
+`verify_()`, which raises `ValueError`. Tensor ops accept rank 2, or rank 3
+with a leading batch dim.
 
-VecInt/TensorInt (below) constrain element type only -- neither binds shapes
-across an op's operands. This is why every op with a shape relationship between
-its operands (mismatched-width scalar ops, same-shape vector ops, hc.matmul's
-MxK*KxN->MxN and its batched BxMxK*BxKxN->BxMxN variant, the tensor elementwise
-family's exact-shape match) needs its own hand-written verify_(): the type
-system alone cannot express those constraints.
-See docs/DESIGN.md Section 2 for why scalars, vectors, and tensors are modeled
-as genuinely different op families rather than one polymorphic op per operation.
-
-Every op defined here must also be added to the HiCompiler Dialect tuple at the
-bottom of this file -- an op that isn't registered there isn't part of the
-dialect at all, however correctly it's otherwise defined. See
-docs/HOW_TO_ADD_AN_OP.md for the full checklist.
+An op belongs to the dialect only once it is listed in the `HiCompiler` tuple
+at the bottom of this file (checklist: docs/HOW_TO_ADD_AN_OP.md).
 """
 from xdsl.ir import Dialect
 from xdsl.irdl import (
@@ -33,6 +25,7 @@ from xdsl.dialects.builtin import IntegerType, VectorType, TensorType
 
 
 def _verify_bin_same_int_type(op: IRDLOperation):
+    """Requires lhs, rhs, and res to have the identical integer type."""
     if op.lhs.type != op.rhs.type or op.res.type != op.lhs.type:
         raise ValueError(
             f"{op.name}: operands and result must have the exact same integer type, "
@@ -86,6 +79,7 @@ class HCRelu(IRDLOperation):
 
 @irdl_op_definition
 class HCPow(IRDLOperation):
+    """base ** exp, defined for exp >= 0 (the lowering yields 1 for exp < 0)."""
     name = "hc.pow"
     base = operand_def(IntegerType)
     exp  = operand_def(IntegerType)
@@ -125,6 +119,7 @@ VecInt = VectorType.constr(element_type=IntegerType)
 
 
 def _verify_bin_same_vec_type(op: IRDLOperation):
+    """Requires lhs, rhs, and res to have the identical vector type."""
     lhs_t = op.lhs.type
     rhs_t = op.rhs.type
     res_t = op.res.type
@@ -162,7 +157,7 @@ class HCSubVec(IRDLOperation):
 
 @irdl_op_definition
 class HCMulVec(IRDLOperation):
-    """scalar * vector -> vector (element-wise scale)"""
+    """scalar * vector -> vector: multiplies every lane by `scalar`."""
     name = "hc.mul_vec"
     scalar = operand_def(IntegerType)
     vec = operand_def(VecInt)
@@ -178,7 +173,7 @@ class HCMulVec(IRDLOperation):
 
 @irdl_op_definition
 class HCReluVec(IRDLOperation):
-    """ReLU over a vector: max(x, 0) element-wise"""
+    """Element-wise max(x, 0) over a vector."""
     name = "hc.relu_vec"
     x = operand_def(VecInt)
     res = result_def(VecInt)
@@ -192,7 +187,7 @@ class HCReluVec(IRDLOperation):
 
 @irdl_op_definition
 class HCMulVecVec(IRDLOperation):
-    """vector * vector -> vector (element-wise)"""
+    """Element-wise vector * vector -> vector."""
     name = "hc.mul_vec_vec"
     lhs = operand_def(VecInt)
     rhs = operand_def(VecInt)
@@ -205,7 +200,7 @@ class HCMulVecVec(IRDLOperation):
 # -----------------------------
 # Tensor operations
 # -----------------------------
-# "2D tensor of integers" type constraint (any element width, rank checked in verify_)
+# "Tensor of integers" type constraint (any element width; rank checked in verify_)
 TensorInt = TensorType.constr(element_type=IntegerType)
 
 
@@ -215,18 +210,16 @@ def _dim(int_attr) -> int:
 
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
-    """(MxK) * (KxN) -> (MxN), or batched (BxMxK) * (BxKxN) -> (BxMxN) with a
-    matching leading batch dim."""
+    """(MxK) @ (KxN) -> (MxN), or batched (BxMxK) @ (BxKxN) -> (BxMxN)."""
     name = "hc.matmul"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        """shape[:-2] is the (possibly empty) batch prefix, shape[-2:] is the
-        actual MxK/KxN/MxN pair: each operand must be rank-2 or rank-3, all
-        three operands must share the same rank, and when a batch prefix is
-        present it must match across lhs/rhs/res."""
+        """Requires lhs/rhs/res to be all rank-2 or all rank-3, share an
+        element type and batch prefix (shape[:-2]), and satisfy
+        MxK @ KxN -> MxN on shape[-2:]."""
         lhs_t, rhs_t, res_t = self.lhs.type, self.rhs.type, self.res.type
 
         for label, t in (("lhs", lhs_t), ("rhs", rhs_t), ("res", res_t)):
@@ -269,13 +262,8 @@ class HCMatmul(IRDLOperation):
 
 
 def _verify_bin_same_tensor_type(op: IRDLOperation):
-    """Shared verify_() for tensor⊙tensor elementwise ops: unlike hc.matmul (whose
-    operand shapes legitimately differ), lhs/rhs/res must be the exact same
-    tensor type -- rank-2, or rank-3 with a leading batch dim, and in the
-    rank-3 case the exact type-equality check below requires the batch dim to
-    match along with the rest of the shape. TensorInt alone doesn't bind shape
-    across operands (see module docstring), so this still needs a hand-written
-    check."""
+    """Requires lhs, rhs, and res to have the identical rank-2 or rank-3
+    tensor type."""
     lhs_t, rhs_t, res_t = op.lhs.type, op.rhs.type, op.res.type
     if len(lhs_t.shape) not in (2, 3):
         raise ValueError(
@@ -294,7 +282,7 @@ def _verify_bin_same_tensor_type(op: IRDLOperation):
 
 @irdl_op_definition
 class HCAddTensor(IRDLOperation):
-    """Element-wise tensor + tensor -> tensor (rank-2, exact same shape)"""
+    """Element-wise tensor + tensor -> tensor."""
     name = "hc.add_tensor"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
@@ -306,7 +294,7 @@ class HCAddTensor(IRDLOperation):
 
 @irdl_op_definition
 class HCSubTensor(IRDLOperation):
-    """Element-wise tensor - tensor -> tensor (rank-2, exact same shape)"""
+    """Element-wise tensor - tensor -> tensor."""
     name = "hc.sub_tensor"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
@@ -318,9 +306,8 @@ class HCSubTensor(IRDLOperation):
 
 @irdl_op_definition
 class HCMulTensor(IRDLOperation):
-    """Element-wise tensor * tensor -> tensor (rank-2, exact same shape).
-    Deliberately no scalar*tensor variant (unlike hc.mul_vec) -- not asked for,
-    and would need a tensor-analogue of vector.broadcast to lower."""
+    """Element-wise tensor * tensor -> tensor. There is no scalar * tensor
+    variant."""
     name = "hc.mul_tensor"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
@@ -332,8 +319,7 @@ class HCMulTensor(IRDLOperation):
 
 @irdl_op_definition
 class HCReluTensor(IRDLOperation):
-    """ReLU over a tensor: max(x, 0) element-wise. Rank-2, or rank-3 with a
-    leading batch dim."""
+    """Element-wise max(x, 0) over a tensor."""
     name = "hc.relu_tensor"
     x = operand_def(TensorInt)
     res = result_def(TensorInt)

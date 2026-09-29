@@ -1,11 +1,14 @@
-import onnx
-from onnx import helper, TensorProto
+"""Builders for the sample ONNX models (all INT32, opset 13).
 
+Each builder checks the model with `onnx.checker` and saves it to `path`,
+by default `build/<name>.onnx`, creating the directory if needed. Running
+this module writes all five models.
+"""
 import os
 import onnx
 from onnx import helper, TensorProto
 
-# Base directory: the "build" folder next to "frontend"
+# Base directory: build/ at the repository root
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "build")
 
 MODEL_PATH = os.path.join(BASE_DIR, "score_model.onnx")
@@ -16,7 +19,8 @@ BATCHED_MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "batched_matmul.onnx")
 
 
 def build_score_model(path: str = MODEL_PATH):
-
+    """Scalar model: score = relu(min(max(alpha * |x - mu| ** p, lo), hi)),
+    with one scalar input `x`. Exercises Sub, Max, Pow, Mul, Min, Relu."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # ------------------------------------------------------------
     # Parameters
@@ -93,10 +97,9 @@ def build_score_model(path: str = MODEL_PATH):
 
 
 def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int = 4):
-    """Build a simple 3-node vector model: y = relu(a * x + b), shape [n].
-
-    All tensors are vector-shaped [n]; no broadcasting involved.
-    """
+    """Vector model: y = relu((a * x + b) * w), with vector inputs x, b of
+    shape [n], a scalar input a, and a constant vector w = [7, 2, 3, 5]
+    (so n must be 4)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     # ------------------------------------------------------------
@@ -153,8 +156,7 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
 
 
 def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
-    """Build a single-node ONNX model: C = A @ B, A:(MxK), B:(KxN), C:(MxN)."""
-
+    """Single-node model: C = A @ B, A:(MxK), B:(KxN), C:(MxN)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     a = helper.make_tensor_value_info("a", TensorProto.INT32, [m, k])
@@ -186,9 +188,9 @@ def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n:
 
 
 def build_chained_tensor_model(path: str = CHAINED_TENSOR_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
-    """Builds Y = ReLU((A @ B) + C). 
-    Proves intermediate tensor buffers are allocated, threaded, and explicitly freed.
-    """
+    """Tensor chain: Y = relu((A @ B) + C), A:(MxK), B:(KxN), C and Y:(MxN).
+    Its two intermediate tensors become temporary buffers after
+    bufferization."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     # ------------------------------------------------------------
@@ -234,8 +236,7 @@ def build_chained_tensor_model(path: str = CHAINED_TENSOR_MODEL_PATH, m: int = 4
 def build_batched_matmul_model(
     path: str = BATCHED_MATMUL_MODEL_PATH, batch: int = 2, m: int = 4, k: int = 4, n: int = 4
 ):
-    """Build a single-node ONNX model: C = A @ B, batched over a leading dim,
-    A:(BxMxK), B:(BxKxN), C:(BxMxN)."""
+    """Single-node batched model: C = A @ B, A:(BxMxK), B:(BxKxN), C:(BxMxN)."""
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
 

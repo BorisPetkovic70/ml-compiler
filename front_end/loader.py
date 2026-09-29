@@ -1,21 +1,12 @@
-"""ONNX -> hc.* module: one loader, dispatching on declared/observed shape.
+"""Imports an ONNX graph as an `hc` module with one `func.func`.
 
-Each ONNX graph *input*'s hc type is decided once, from its declared shape alone
-(_type_from_value_info: rank-0 -> i32, rank-1 -> VectorType, rank-2 or rank-3
-(batched) -> TensorType). Each *node* then picks its concrete hc.* op class
-(scalar vs. *_vec vs. *_tensor vs. matmul) from the operand types it actually
-sees at that point in the graph -- not from the node's own declared shape,
-since ONNX doesn't attach one to intermediate values the way it does to graph
-inputs.
-
-ONNX *initializers*/`Constant` nodes go through a separate function,
-_const_op_from_tensor, mirroring the same rank rule -- a constant and a graph
-input of the same shape must produce the same hc type, or a downstream op
-(hc.matmul) would see mismatched operand types depending on whether one
-operand came from an initializer or a runtime input.
-
-See docs/DESIGN.md Section 1 for why this dispatch happens once, in this file,
-rather than being re-derived at every consumer downstream.
+Types come from ONNX shapes, with every element type imported as i32: rank 0
+-> i32, rank 2 or 3 -> TensorType, any other rank -> VectorType. Graph inputs
+use their declared shape (`_type_from_value_info`); initializers and
+`Constant` nodes use the same rule (`_const_op_from_tensor`), so a constant
+and a runtime input of the same shape get the same type. Each node picks its
+hc op variant (scalar, `*_vec`, `*_tensor`) from the types of the operands it
+receives.
 """
 import onnx
 from xdsl.dialects import func, arith, builtin
@@ -43,9 +34,7 @@ def _vec_type_from_shape(shape) -> builtin.VectorType:
 
 
 def _type_from_value_info(value_info):
-    """i32 for a rank-0 (scalar) ONNX input, VectorType for rank-1, TensorType
-    for rank-2 (matmul/elementwise operands) or rank-3 (the same, with a
-    leading batch dim)."""
+    """Returns the hc type for an ONNX graph input's declared shape."""
     dims = [d.dim_value for d in value_info.type.tensor_type.shape.dim]
     if not dims:
         return i32
@@ -55,9 +44,8 @@ def _type_from_value_info(value_info):
 
 
 def _const_op_from_tensor(tensor_proto) -> arith.ConstantOp:
-    """arith.constant from an ONNX tensor: scalar i32 if rank-0, dense tensor if
-    rank-2 or rank-3 (matmul/elementwise operands, the latter batched), dense
-    vector otherwise."""
+    """Builds an `arith.constant` (scalar i32, or dense tensor/vector) from an
+    ONNX TensorProto."""
     arr = onnx.numpy_helper.to_array(tensor_proto)
     if arr.shape == ():
         return arith.ConstantOp.from_int_and_width(int(arr), 32)
@@ -88,14 +76,21 @@ def _dim_as_int(int_attr) -> int:
 def import_onnx_to_hc_module(
     ctx: Context, onnx_path: str, fn_name: str = "main"
 ) -> ModuleOp:
+    """Loads `onnx_path` and returns a module holding `func.func @fn_name`,
+    with one block argument per graph input and a single result.
+
+    Raises NotImplementedError for an unsupported op_type or a vector operand
+    to Pow/Max/Min, ValueError for a model without exactly one output or a
+    `Constant` node without a `value` attribute, and KeyError when a node
+    reads a value that is not yet defined.
+    """
     model = onnx.load(onnx_path)
     graph = model.graph
 
     # Map ONNX value names -> SSAValue (results)
     env: dict[str, object] = {}
 
-    # One block argument per ONNX graph input; scalar (i32) or vector,
-    # depending on that input's declared shape.
+    # One block argument per ONNX graph input, typed from its declared shape.
     input_types = [_type_from_value_info(vi) for vi in graph.input]
     entry_block = Block(arg_types=input_types)
     for value_info, arg in zip(graph.input, entry_block.args):

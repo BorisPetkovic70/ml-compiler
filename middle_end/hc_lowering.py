@@ -1,16 +1,16 @@
-"""Lowers every hc.* operation to arith./scf./vector./tensor.
+"""Lowers hc ops to arith/scf/vector/tensor, with value semantics.
 
-LowerHCPattern.match_and_rewrite dispatches on op.name against a fixed tuple of
-recognized names before doing anything else. An op name left out of that tuple is
-NOT an error: the pattern silently returns, and the unlowered hc.* op survives
-into whatever runs next (bufferization, the backend), neither of which recognizes
-hc.* at all -- so the failure surfaces far from its actual cause. When adding a new
-hc.* op, add its name to that tuple before writing the lowering branch (see
-docs/HOW_TO_ADD_AN_OP.md), so a missing branch fails immediately as "no matching
-branch" instead of passing through unnoticed.
+- Scalar and vector ops become one arith op each; `hc.mul_vec` first
+  broadcasts its scalar with `vector.broadcast`.
+- `hc.pow` becomes an `scf.for` multiply loop.
+- `hc.max`/`hc.min` become `arith.cmpi` + `scf.if`.
+- Tensor ops become `scf.for` nests over `tensor.extract`/`tensor.insert`
+  (docs/DESIGN.md Section 3).
 
-See docs/DESIGN.md for why lowering exists as a separate stage from bufferization
-(value semantics here; memory semantics is a later, separate pass).
+`LowerHCPattern` returns without rewriting for any op whose name is not in its
+dispatch tuple, and also for a listed name that has no branch. A missing
+lowering therefore leaves the hc op in the IR; `tests/test_lowering.py`
+asserts that none survive.
 """
 from xdsl.dialects import arith, builtin, scf, tensor, vector
 from xdsl.ir import Block, Operation, Region
@@ -24,7 +24,7 @@ def _const_i32(value: int) -> arith.ConstantOp:
 
 
 # -----------------------------------------------------------------------------
-#  Vector lowering helpers (ported from step13_vec_operators.py)
+#  Vector lowering helpers
 # -----------------------------------------------------------------------------
 def _as_int(x) -> int:
     """Convert xDSL int-like objects (IntAttr, nested attrs) to a python int."""
@@ -49,7 +49,8 @@ def _vec_num_elements(vec_type: builtin.VectorType) -> int:
 
 
 def _const_zero_like(like_type) -> arith.ConstantOp:
-    """Create a constant 0 with the same type as `like_type` (scalar or vector)."""
+    """Returns a constant 0: a dense vector of `like_type` for a vector type,
+    otherwise an i32."""
     if isinstance(like_type, builtin.VectorType):
         count = _vec_num_elements(like_type)
         dense = builtin.DenseIntOrFPElementsAttr.from_list(like_type, [0] * count)
@@ -62,16 +63,13 @@ def _const_zero_like(like_type) -> arith.ConstantOp:
 #  Matmul lowering helper
 # -----------------------------------------------------------------------------
 def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
-    """Build the value-semantics loop nest for C = A @ B: (MxK)@(KxN)->(MxN)
-    when res_type is rank-2, or an outer batch loop wrapping that same nest
-    when res_type is rank-3 ((BxMxK)@(BxKxN)->(BxMxN)).
+    """Builds the loop nest computing `lhs @ rhs` into a zero-initialized
+    tensor of `res_type`, and returns (new_ops, result_value).
 
-    The outermost loops (the batch loop, when present, then i, then j) thread
-    the accumulator tensor through iter_args (each tensor.insert yields a
-    *new* tensor); the innermost k loop threads a scalar accumulator. Every
-    extract/insert index list is prefixed with the batch induction variable
-    when a batch dim is present, and is just [i,k]/[k,j]/[i,j] otherwise.
-    Returns (new_ops, result_value).
+    The i and j loops (and the outer batch loop, for rank 3) carry the result
+    tensor in iter_args. The innermost k loop carries a scalar accumulator.
+    For rank 3, the batch induction variable is prepended to every
+    extract/insert index.
     """
     res_dims = [_as_int(d) for d in res_type.shape]
     batched = len(res_dims) == 3
@@ -149,17 +147,12 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
 #  Tensor elementwise lowering helper (add/sub/mul/relu_tensor share this)
 # -----------------------------------------------------------------------------
 def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compute):
-    """Build a value-semantics scf.for nest applying `compute` element-wise over
-    tensor operand(s), producing a new tensor of res_type: i/j loops (2 levels)
-    when res_type is rank-2, or an outer batch loop wrapping the same i/j
-    loops (3 levels) when res_type is rank-3. This is a map, not an
-    accumulate, so no k-reduction level is needed either way.
+    """Builds an i/j loop nest (plus an outer batch loop for rank 3) that
+    writes `compute` of each element into a new tensor of `res_type`, and
+    returns (new_ops, result_value).
 
-    `operands` is [lhs] for a unary op (relu) or [lhs, rhs] for a binary one.
-    `compute(a_val, b_val_or_None) -> (extra_ops, result_ssa_value)` builds the
-    per-element operation; callers differ only in this closure. Every
-    extract/insert index list is prefixed with the batch induction variable
-    when a batch dim is present, and is just [i,j] otherwise.
+    `operands` is [x] for a unary op or [lhs, rhs] for a binary one.
+    `compute(a, b_or_None)` returns (ops, result_value) for one element.
     """
     res_dims = [_as_int(d) for d in res_type.shape]
     batched = len(res_dims) == 3
@@ -520,8 +513,7 @@ class LowerHCPattern(RewritePattern):
             (x,) = op.operands
 
             def compute(a, _b):
-                # a's type is the element type (e.g. i32), same idiom as _const_i32
-                # but width-agnostic since hc.matmul (and now this) don't hardcode i32.
+                # Zero of the element type: tensor lowerings don't assume i32.
                 zero = arith.ConstantOp.from_int_and_width(0, a.type)
                 mx = arith.MaxSIOp(a, zero.result)
                 return [zero, mx], mx.result

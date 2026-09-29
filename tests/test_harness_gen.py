@@ -198,8 +198,8 @@ def test_refuses_unsupported_element_type():
 
 
 def test_vector_harness_uses_the_register_abi_typedef():
-    """The vector path predates this file's tests; pin it now that the known-working
-    compiled vector ABI (GCC vector_size, passed in registers) depends on it."""
+    """Vectors are declared and passed as a GCC vector_size typedef, which the
+    compiled register ABI requires."""
     from conftest import const_vec
     from hc_dialect import HCAddVec
 

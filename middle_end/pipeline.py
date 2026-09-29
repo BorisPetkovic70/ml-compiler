@@ -1,22 +1,10 @@
-"""The middle-end pass pipeline: lowering, bufferization, constant folding, DCE.
+"""The middle-end pass pipeline:
+lowering -> bufferization -> constant folding -> DCE.
 
-Pass ordering is load-bearing and not re-derivable from the code alone:
-  lowering -> bufferization -> constant folding -> DCE
-Bufferization must run after lowering (tensors, and hc.matmul's zero-init
-constant, only exist post-lowering) and before DCE (so DCE can clean up any dead
-index arithmetic bufferization's fill loops introduce). Loop-transform passes
-(interchange, tiling) will add more edges to this ordering; extend the list
-above when they do, don't just append the call.
-
-apply_passes() never calls module.verify() on its own output -- and this is NOT
-because verifying after each pass would cause problems.
-It's a separation-of-concerns choice: whether/when to verify, and what to do if
-it fails, is the caller's policy, not this pipeline's. hc_main.py never verifies
-at all (it relies on the interpreter's before/after comparison instead);
-tests/conftest.py::lower() verifies immediately after apply_passes() because the
-test suite wants a hard stop the moment something's structurally wrong (see
-docs/DESIGN.md Section 5). Any other caller should decide this deliberately, not
-assume the pipeline did it for them.
+The order is fixed and load-bearing (docs/DESIGN.md Section 5); each pass is
+switched on or off by `MiddleEndPipelineConfig`. `apply_passes` rewrites the
+module in place and never calls `module.verify()`: verification is the
+caller's responsibility.
 """
 import inspect
 from dataclasses import dataclass
@@ -38,6 +26,8 @@ from .hc_lowering import LowerHCPattern
 # -----------------------------
 @dataclass(frozen=True)
 class MiddleEndPipelineConfig:
+    """Pass switches. `debug_mode` prints the module after each pass;
+    `run_analysis` prints the analysis.py reports after the last pass."""
     run_analysis: bool = False
     debug_mode: bool = False
 
@@ -55,6 +45,7 @@ class MiddleEndPipeline:
         self.config = config
 
     def apply_passes(self, module: ModuleOp) -> None:
+        """Runs the enabled passes on `module`, in place."""
         if self.config.apply_lowering:
             # Apply lowering
             _apply_pass(module, LowerHCPattern)
@@ -86,6 +77,7 @@ class MiddleEndPipeline:
 
 
 def _apply_pass(module: ModuleOp, pattern: RewritePattern) -> None:
+    """Applies `pattern` greedily to the body of every func.func in `module`."""
     applier = GreedyRewritePatternApplier([pattern()])
 
     # Some xdsl builds have extra kwargs; enable recursion if available.

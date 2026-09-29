@@ -1,12 +1,10 @@
 """Structural checks for tensor -> memref bufferization.
 
-apply_bufferization() is wired into MiddleEndPipeline (see
-test_pipeline_bufferize_flag_wires_in_the_pass below), but these tests mostly call it
-directly on an already-lowered module instead, to isolate the pass's own shape from
-the rest of the pipeline -- the same two-level (structural + attribute/wiring)
-discipline as test_lowering.py uses for lowering. The semantic (NumPy-equality) gate
-on the bufferized IR, run through the interpreter's memref support, lives in
-test_interpreter.py, next to hc.matmul's own semantic gate.
+Most tests call apply_bufferization directly on an already-lowered module, to
+isolate the pass from the rest of the pipeline. They check both which ops are
+present and how their operands are wired.
+test_pipeline_bufferize_flag_wires_in_the_pass covers the pipeline wiring. The
+semantic (NumPy-equality) check of bufferized IR is in test_interpreter.py.
 """
 import pytest
 
@@ -76,12 +74,8 @@ def _batched_matmul_module():
 
 
 def test_batched_tensor_bufferizes_with_the_same_op_counts_as_rank_2():
-    """apply_bufferization has no rank-specific code anywhere: _fill_ops loops over
-    however many dims the tensor constant has, _extract/_insert pass op.indices
-    through regardless of count, and _memref_type converts via .shape generically.
-    This proves a rank-3 (batched) tensor bufferizes with the exact same op-count
-    shape as rank-2, empirically, rather than only asserting it from reading the
-    pass's source."""
+    """A rank-3 (batched) matmul bufferizes to the same alloc/load/store
+    counts as rank 2, with 3-index loads and memref-only signature types."""
     m, _, _ = _batched_matmul_module()
     apply_bufferization(m)
     m.verify()
@@ -101,9 +95,8 @@ def test_batched_tensor_bufferizes_with_the_same_op_counts_as_rank_2():
 
 
 def test_i_and_j_loops_drop_iter_args_k_loop_keeps_its_accumulator():
-    """The value-semantics-to-memory-semantics transformation, made concrete: stores
-    now mutate one buffer, so the outer two loops (which used to thread the result
-    tensor through iter_args) no longer need to carry anything."""
+    """After bufferization, stores mutate one buffer, so the i and j loops carry
+    no iter_args. The k loop keeps its scalar accumulator."""
     m, _, _ = _matmul_module()
     apply_bufferization(m)
     m.verify()
@@ -181,10 +174,9 @@ def test_function_without_tensors_is_left_untouched():
 
 
 def test_chained_matmul_then_relu_tensor_intermediate_buffer_is_threaded_and_freed():
-    """hc.matmul's result is a temporary this pass owns, consumed only by the following
-    hc.relu_tensor -- proves the intermediate buffer is threaded via memref.load (not
-    re-derived some other way) and freed once its one consumer is done with it, rather
-    than leaked or aliased into the returned buffer."""
+    """hc.matmul's result is a temporary buffer read only by hc.relu_tensor.
+    The relu nest must memref.load from that buffer, and the buffer must be
+    deallocated, not leaked or aliased into the returned buffer."""
     def body(args):
         a, b = args
         mm = HCMatmul(operands=[a, b], result_types=[tensor_ty(_M, _N)])
@@ -223,8 +215,8 @@ def _index_const_value(v) -> int:
 
 
 def test_refuses_insert_into_a_tensor_with_a_second_use():
-    """Two inserts share the same source tensor -- our own lowering never does this,
-    but if it ever did, storing into one in place would silently corrupt the other."""
+    """Two inserts share one source tensor, so storing into it in place for one
+    would corrupt what the other sees."""
     def body(_args):
         t0 = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(tensor_ty(2, 2), [0] * 4))
         i0, i1 = _idx(0), _idx(1)
@@ -326,9 +318,8 @@ def test_refuses_an_unhandled_tensor_producing_op():
 
 
 def test_refuses_tensor_constant_inside_a_nested_region():
-    """This pass only handles a tensor constant hoisted to function-body top level
-    (the shape the lowering it runs on always produces); a constant built inside a
-    loop body (not the entry block) isn't handled."""
+    """Tensor constants are handled only in the function's entry block, where
+    the lowering places them. A tensor constant inside a loop body is refused."""
     def body(_args):
         c0, c1, c2 = _idx(0), _idx(1), _idx(2)
         blk = Block(arg_types=[IndexType()])
@@ -393,9 +384,7 @@ def test_temporary_buffer_not_returned_is_deallocated():
 
 
 def test_pipeline_bufferize_flag_wires_in_the_pass():
-    """Proves the wiring itself (lower(..., bufferize=True) actually invokes
-    apply_bufferization, in the right order relative to lowering) -- not the pass's
-    own logic, which the rest of this file already covers thoroughly via direct calls."""
+    """lower(..., bufferize=True) runs apply_bufferization after lowering."""
     m, _, _ = _matmul_module()
     lower(m, bufferize=True)
     m.verify()
@@ -404,10 +393,8 @@ def test_pipeline_bufferize_flag_wires_in_the_pass():
 
 
 def test_apply_bufferization_defaults_on_in_the_pipeline_config():
-    """conftest.lower() always passes apply_bufferization explicitly (mirroring the
-    fold/dce test-harness convention), so nothing else exercises the dataclass's own
-    class-level default -- check it directly: it must default True, matching its
-    apply_lowering/apply_constant_folding/apply_dce siblings, the actual switch that
-    makes bufferization run automatically in the real (non-test-harness) pipeline."""
+    """MiddleEndPipelineConfig.apply_bufferization defaults to True, like the
+    other pass switches. conftest.lower() always passes the flag explicitly,
+    so only this test covers the default."""
     from middle_end.pipeline import MiddleEndPipelineConfig
     assert MiddleEndPipelineConfig().apply_bufferization is True

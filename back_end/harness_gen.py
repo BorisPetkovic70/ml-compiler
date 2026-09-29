@@ -1,28 +1,19 @@
-"""Generate a C harness matching an hc module's entry function signature.
+"""Generates a C `main` that calls a module's entry function with its exact
+signature and prints the result. Run it on the module *after* the middle end,
+because bufferization changes the signature.
 
-Since the compiled pipeline calls the emitted LLVM function directly through a
-C `extern` declaration, the harness has to match that function's exact
-argument/result types -- which vary per model (scalar-only, vector-only,
-multiple inputs, mixed scalar+vector). One static harness.c can't cover all of
-them, so this generates a matching one per model instead.
+The generator uses one of two calling conventions (docs/DESIGN.md Section 6):
+- If no memref appears in the signature, it calls `<fn>` directly, passing
+  scalars as `int` and vectors as GCC `vector_size` types.
+- If any memref appears, it calls `_mlir_ciface_<fn>`, passing each memref
+  as a pointer to a descriptor struct and receiving the result through a
+  leading out-parameter. It frees the result buffer, which the callee
+  allocated.
 
-There are two calling conventions to match, so there are two generators:
-
-  * scalar/vector signatures call the emitted function `<fn>` directly, passing
-    scalars as `int` and vectors as GCC `vector_size` values (register ABI);
-  * any signature containing a `memref` (i.e. anything that went through
-    bufferization) instead calls `_mlir_ciface_<fn>`, the C wrapper emitted by
-    mlir-opt's --llvm-request-c-wrappers. There, every memref is passed as a
-    *pointer to a descriptor struct* {allocated, aligned, offset, sizes[],
-    strides[]}, and a memref return value becomes a leading out-parameter:
-
-        void _mlir_ciface_my_func(MemRef2D_i32 *result, MemRef2D_i32 *a, ...)
-
-    The callee mallocs the returned buffer (memref.alloc lowers to malloc), so
-    the harness frees result.allocated when it is done.
-
-Because the memref signature only appears after bufferization, hc_main.py
-generates the harness *after* running the middle end, not before it.
+The generated program reads one integer from argv per scalar, per vector
+lane, and per buffer element, in argument order. Any value not supplied
+defaults to `10 * (i + 1)` for scalar argument i, or `10*i + k + 1` for
+element k of shaped argument i.
 """
 from xdsl.dialects import func
 from xdsl.dialects.builtin import MemRefType, VectorType
@@ -56,6 +47,9 @@ def _find_entry(module, func_name: str) -> func.FuncOp:
 
 
 def generate_harness_c(module, func_name: str = "my_func") -> str:
+    """Returns the harness C source for `func_name`. Raises RuntimeError if
+    the function is missing, doesn't have exactly one result, or has a memref
+    signature the generator doesn't support."""
     fn = _find_entry(module, func_name)
     in_types = list(fn.function_type.inputs.data)
     out_types = list(fn.function_type.outputs.data)
@@ -152,12 +146,8 @@ def _row_major_strides(dims: list[int]) -> list[int]:
 
 
 def _print_result_lines(out_dims: list[int]) -> list[str]:
-    """Nested for-loops printing result.aligned in bracketed rows: every
-    dimension but the last wraps a for-loop that prints '[' on entry and ']'
-    plus a newline on exit; the last dimension is the flat, comma-separated
-    printf loop over individual elements. A rank-1 result has no wrapping
-    loop at all -- just the single bracketed line -- and each additional
-    dimension adds one more wrapping loop around that same innermost line."""
+    """Returns C lines that print `result` one innermost row per line, as
+    `[a, b, ...]`, looping over the outer dimensions."""
     rank = len(out_dims)
     ivs = [f"i{d}" for d in range(rank)]
     idx = "result.offset + " + " + ".join(
@@ -181,6 +171,8 @@ def _print_result_lines(out_dims: list[int]) -> list[str]:
 
 
 def _generate_memref_harness(func_name, in_types, out_type) -> str:
+    """Raises RuntimeError for a non-memref result, a vector argument, a
+    memref that isn't rank 1-3, or an element type that isn't i8/i16/i32/i64."""
     if not isinstance(out_type, MemRefType):
         raise RuntimeError(
             "harness generator: a memref-taking function must also return a memref "
@@ -274,5 +266,6 @@ def _generate_memref_harness(func_name, in_types, out_type) -> str:
 
 
 def write_harness(module, out_path, func_name: str = "my_func") -> None:
+    """Writes `generate_harness_c(module, func_name)` to `out_path`."""
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(generate_harness_c(module, func_name))

@@ -1,13 +1,10 @@
-"""End-to-end compiled-backend tests: build a real model, run it all the way through
-the LLVM/MLIR toolchain to a native executable, and check the executable's own stdout
-against an independent oracle (plain Python or NumPy) -- not the project's own
-interpreter, since the whole point of these tests is to check the compiled ABI path,
-which the interpreter never exercises. String-checking the generated harness source
-(see test_harness_gen.py) can confirm the descriptor layout looks right; only actually
-compiling and running it can confirm the ABI is right.
+"""End-to-end compiled-backend tests. Each compiles a model to a native
+executable with the LLVM/MLIR toolchain and checks its stdout against plain
+Python or NumPy. The interpreter isn't used as the oracle here because it
+never exercises the C ABI.
 
-Skipped whenever the LLVM/MLIR toolchain isn't on PATH, so the rest of the suite stays
-toolchain-free -- these are the only tests in the project that spawn a subprocess.
+Skipped unless mlir-opt, mlir-translate, llc, and clang are all on PATH.
+These are the only tests that spawn subprocesses.
 """
 import os
 import re
@@ -33,12 +30,11 @@ pytestmark = pytest.mark.skipif(
 
 
 def _compile_and_run(tmp_path, onnx_path, run_args):
-    """Load, lower (folding+DCE+bufferization all on, the real pipeline's defaults),
-    write a harness, and compile it to a native executable via the exact same
-    mlir-opt/mlir-translate/llc/clang pass list as back_end/back_end.sh -- replicated
-    here with PATH-resolved tools rather than by invoking that script, since its
-    TOOLCHAIN_BIN_DIR is a hardcoded, machine-specific path (see CLAUDE.md). Runs the
-    executable with run_args and returns its stdout."""
+    """Loads `onnx_path` and runs the full middle end (every pass on), then
+    verifies the module and writes a harness. It compiles the result with
+    back_end.sh's pass list, using the tools found on PATH (back_end.sh's
+    default TOOLCHAIN_BIN_DIR is machine-specific). Finally it runs the
+    executable with `run_args` and returns its stdout."""
     ctx = build_context()
     module = import_onnx_to_hc_module(ctx, str(onnx_path), fn_name="my_func")
 
@@ -157,16 +153,15 @@ def test_memref_abi_compiles_and_matches_independent_oracle(tmp_path):
 
 
 def test_real_scripts_compile_and_run_end_to_end_matches_numpy():
-    """Runs the ACTUAL hc_main.py and back_end.sh scripts as subprocesses -- unlike
-    the other tests in this file, which import the pipeline functions directly and
-    replicate back_end.sh's compile steps by hand. This is the layer that catches a
-    bug in the scripts' own path/stem/argument-handling logic (the class of bug that's
-    hit this project twice before, per CLAUDE.md's Milestones), which the other tests
-    can't see since they never invoke the scripts themselves.
+    """Compiles and runs a model through hc_main.py and back_end.sh as real
+    subprocesses, then checks the compiled executable's stdout against NumPy.
+    Exercises the scripts' own path resolution, stem computation, and argument
+    forwarding, not just the underlying pipeline functions.
 
-    Uses a model name distinct from any the user compiles by hand, so it doesn't
-    clobber their own build/ or back_end/*_harness.c files; those directories aren't
-    isolated per-test the way tmp_path is, since the scripts hardcode them."""
+    Uses a model name distinct from any model compiled by hand, so it doesn't
+    overwrite build/ or back_end/*_harness.c files a manual run would also use --
+    those paths are hardcoded by the scripts, not isolated per test the way
+    tmp_path is."""
     np = pytest.importorskip("numpy")
 
     model_name = "test_compiled_backend_e2e"
@@ -184,9 +179,9 @@ def test_real_scripts_compile_and_run_end_to_end_matches_numpy():
         cwd=_REPO_ROOT, check=True, capture_output=True, text=True,
     )
 
-    # TOOLCHAIN_BIN_DIR override: back_end.sh's own default points at a hardcoded,
-    # machine-specific LLVM build (see CLAUDE.md) that won't exist here or on most
-    # machines -- this is the fix that makes it possible to run the script for real.
+    # back_end.sh's own default TOOLCHAIN_BIN_DIR points at a machine-specific LLVM
+    # build that won't exist here or on most machines, so point it at the toolchain
+    # actually resolved from PATH instead.
     toolchain_dir = os.path.dirname(shutil.which("mlir-opt"))
     run_args = [*a.flatten().tolist(), *b.flatten().tolist()]
     result = subprocess.run(

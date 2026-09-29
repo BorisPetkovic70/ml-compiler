@@ -1,6 +1,6 @@
-"""Operator semantics: run each op through the interpreter both BEFORE and
-AFTER lowering and assert the same result -- this is what actually proves a
-lowering is correct, without compiling anything.
+"""Operator semantics: each op gives the same interpreter result before and
+after lowering (and after bufferization, for matmul), plus unit tests of the
+interpreter's own tensor, memref, and scf.for handling.
 """
 import pytest
 
@@ -95,8 +95,8 @@ def test_mul_vec_constant_scalar_semantics_before_and_after_lowering():
 
 
 def test_mul_vec_runtime_scalar_semantics_before_and_after_lowering():
-    """The scalar is a function argument (not a constant) -- the case that
-    required switching the lowering from constant-splat to vector.broadcast."""
+    """The scalar is a function argument rather than a constant, so the
+    lowering must broadcast it at runtime."""
     def body(args):
         (s,) = args
         v = const_vec([1, 2, 3, 4])
@@ -110,8 +110,8 @@ def test_mul_vec_runtime_scalar_semantics_before_and_after_lowering():
 
 
 def test_mixed_scalar_and_vector_args_affine_relu():
-    """y = relu(a * x + b) with a scalar, x/b vector -- exercises multiple
-    inputs, mixed scalar+vector, and the full add/mul/relu chain together."""
+    """y = relu(a * x + b) with scalar a and vectors x, b: multiple inputs,
+    mixed scalar and vector, and a mul/add/relu chain."""
     def body(args):
         x, a, b = args
         mul = HCMulVec(operands=[a, x], result_types=[x.type])
@@ -156,11 +156,9 @@ def _matmul_module(m: int, k: int, n: int, batch: int | None = None):
     (False, False, False), (True, True, False), (False, False, True), (True, True, True),
 ])
 def test_matmul_semantics_match_numpy_before_and_after_lowering(batch, m, k, n, fold, dce, bufferize):
-    """The semantic gate: the native hc.matmul, the lowered scf.for nest (tensors), and
-    -- once bufferize=True -- the bufferized memref version must all equal NumPy's
-    matmul (signed values, distinct dims, plain and batched), alone and composed with
-    folding/DCE. np.matmul batches over a leading dimension natively, so this is the
-    same comparison either way."""
+    """The native hc.matmul, its lowered tensor nest, and (with bufferize=True)
+    its memref nest all equal np.matmul. Cases cover signed values, distinct
+    dims, plain and batched shapes, and runs with and without folding/DCE."""
     np = pytest.importorskip("numpy")
     rng = np.random.default_rng(seed=m * 100 + k * 10 + n + (batch or 0) * 1000)
     a_shape = (batch, m, k) if batch else (m, k)
@@ -207,10 +205,9 @@ def _tensor_binop_module(op_cls, a_vals, b_vals):
      [[[2, 6], [12, 20]], [[10, 18], [28, 40]]]),
 ])
 def test_tensor_binop_semantics_before_and_after_lowering(op_cls, a, b, expected):
-    """Exercises the now-recursive _elt_binop on real nested-list input, both plain
-    2D and batched (3D, a list of 2D slices) -- a non-recursive version would do list
-    concatenation per row instead of this, and a batch-unaware one would only see the
-    2D case."""
+    """Tensor binops on 2D and batched 3D nested lists, before and after
+    lowering. Catches an _elt_binop that concatenates rows instead of recursing
+    into them."""
     m, a_vals, b_vals = _tensor_binop_module(op_cls, a, b)
     args = [a_vals, b_vals]
     assert run(m, args) == expected
@@ -262,9 +259,9 @@ def _matmul_then_relu_module(m: int, k: int, n: int, batch: int | None = None):
     (False, False, False), (True, True, False), (False, False, True), (True, True, True),
 ])
 def test_chained_matmul_then_relu_tensor_semantics_match_numpy(batch, fold, dce, bufferize):
-    """Chaining hc.matmul into hc.relu_tensor proves the bufferizer correctly threads
-    an intermediate tensor value (the matmul result) into the next op's nest, not just
-    that each op works in isolation -- plain and batched."""
+    """hc.matmul feeding hc.relu_tensor equals max(A @ B, 0), plain and batched.
+    This checks that the intermediate result is threaded correctly from one
+    nest into the next."""
     np = pytest.importorskip("numpy")
     m, k, n = 2, 3, 4
     rng = np.random.default_rng(seed=42 + (batch or 0))
@@ -406,8 +403,8 @@ def test_scf_for_threads_multiple_iter_args_in_yield_order(n):
     (7, 2),
 ])
 def test_pow_semantics_regression_through_general_scf_for(base, exp):
-    """hc.pow used to be evaluated by a dedicated pattern matcher for its lowered
-    scf.for; the general executor must reproduce it, before and after lowering."""
+    """hc.pow gives the same result before lowering and after, when its
+    multiply loop runs on the general scf.for executor."""
     def body(_args):
         b, e = const_i32(base), const_i32(exp)
         op = HCPow(operands=[b.result, e.result], result_types=[b.result.type])
@@ -485,7 +482,7 @@ def _memref_load_at(row: int, col: int):
 
 @pytest.mark.parametrize("row,col", [(2, 0), (0, 2), (0, -1), (-1, 0)])
 def test_memref_load_out_of_bounds_raises(row, col):
-    """Same guard as tensor.extract -- reuses _check_index, no new bounds logic."""
+    """Includes negative indices, which Python lists would silently wrap."""
     with pytest.raises(RuntimeError, match="out of bounds"):
         run(_memref_load_at(row, col))
 

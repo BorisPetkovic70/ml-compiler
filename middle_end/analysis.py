@@ -1,11 +1,7 @@
-"""Read-only use-def and block-local liveness reporting -- currently unused.
-
-Status: wired to MiddleEndPipelineConfig.run_analysis, but that flag defaults
-False and every current call site (hc_main.py, tests/conftest.py) explicitly
-passes False. Nothing in the pipeline reads this analysis's output or makes a
-decision based on it -- it is dead code today, not a foundation any current pass
-builds on.
-"""
+"""Debug reports: prints a use-def listing and block-local liveness sets for
+each function's top-level blocks. Read-only; runs only when
+`MiddleEndPipelineConfig.run_analysis` is set, and no pass consumes its
+output."""
 from typing import Any, Iterable
 from xdsl.dialects import func
 from xdsl.dialects.builtin import ModuleOp
@@ -32,9 +28,8 @@ def print_use_def(block: Block) -> None:
 # Analysis 2: Block-local liveness (straight-line)
 # -----------------------------------------------------------------------------
 def compute_liveness(block: Block):
-    """
-    Returns a list `live_after[i]`: dict of {id(ssa): ssa} live AFTER block.ops[i].
-    """
+    """Returns `live_after`, where `live_after[i]` maps id(value) -> value for
+    every SSA value live after `block.ops[i]`."""
     ops = list(block.ops)
     live_after: list[dict[int, SSAValue]] = [dict() for _ in ops]
 
@@ -95,9 +90,7 @@ def _iter_uses(val: SSAValue) -> Iterable[Any]:
     return uses
 
 def _use_owner_op(use: Any) -> Operation | None:
-    """
-    Try to get the user operation from a Use object.
-    """
+    """Returns the operation that owns `use`, or None."""
     for attr in ("operation", "op", "owner"):
         u = getattr(use, attr, None)
         if isinstance(u, Operation):
@@ -116,9 +109,8 @@ def _fmt_op(op: Operation) -> str:
     return f"{op.name}"
 
 def _val_key(v: SSAValue) -> int:
-    """
-    Use id() as a stable key even if SSAValue is not hashable in some builds.
-    """
+    """Returns id(v), a dictionary key that works whether or not SSAValue is
+    hashable."""
     return id(v)
 
 def _collect_operands(op: Operation) -> list[SSAValue]:

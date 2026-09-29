@@ -1,3 +1,4 @@
+"""Constant folding of integer arith ops on scalar and dense-vector constants."""
 from xdsl.dialects import arith, builtin
 from xdsl.ir import Operation, OpResult, SSAValue
 from xdsl.pattern_rewriter import (
@@ -9,6 +10,10 @@ from xdsl.pattern_rewriter import (
 # Constant folding pattern
 # -----------------------------------------------------------------------------
 class FoldArithInts(RewritePattern):
+    """Replaces an `arith.addi`/`subi`/`muli`/`maxsi` whose operands are both
+    `arith.constant`s, or a `vector.broadcast` of a scalar constant, with one
+    `arith.constant` (a scalar broadcasts against a vector)."""
+
     def match_and_rewrite(self, op: Operation, rewriter: PatternRewriter):
         # Fold a vector.broadcast of a constant scalar into a dense vector
         # constant, so a downstream arith op on it becomes foldable too.
@@ -142,7 +147,7 @@ def _result_width(ty, default: int = 32) -> int:
     if w is None:
         return default
 
-    # In your xdsl, width is an IntAttr, not a Python int
+    # IntegerType.width is an IntAttr, not a Python int
     for attr_name in ("data", "value"):
         if hasattr(w, attr_name):
             return int(getattr(w, attr_name))

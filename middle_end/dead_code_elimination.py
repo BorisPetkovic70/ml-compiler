@@ -1,12 +1,13 @@
+"""Dead code elimination for side-effect-free ops with no uses."""
 from xdsl.dialects import func
 from xdsl.ir import Block, Operation, SSAValue
 # -----------------------------------------------------------------------------
 # Dead code elimination
 # -----------------------------------------------------------------------------
 def apply_dce(module) -> None:
-    """
-    Repeatedly run DCE on all function body blocks until fixpoint.
-    """
+    """Erases unused `arith.*` and `vector.broadcast` ops from the top-level
+    blocks of every func.func in `module`, repeating until nothing changes.
+    Ops nested in loop or `if` bodies are not visited."""
     changed = True
     while changed:
         changed = False
@@ -33,10 +34,8 @@ def _num_uses(v: SSAValue) -> int:
 
 
 def _is_trivially_dceable(op: Operation) -> bool:
-    """
-    Conservative: only remove arith ops (constants and arithmetic) that have
-    no users. Extend later if you add memref/loads/stores/calls etc.
-    """
+    """True for side-effect-free ops DCE may erase: `arith.*` and
+    `vector.broadcast`."""
     if op.name == "func.return":
         return False
 
@@ -52,10 +51,8 @@ def _is_trivially_dceable(op: Operation) -> bool:
 
 
 def dce_block(block: Block) -> bool:
-    """
-    One pass of DCE over a block.
-    Returns True if anything was erased.
-    """
+    """Erases erasable ops in `block` whose results are all unused, in one
+    backward sweep. Returns True if anything was erased."""
     changed = False
 
     # Iterate backwards: safer when erasing

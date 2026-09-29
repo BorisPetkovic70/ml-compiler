@@ -1,6 +1,6 @@
-"""ONNX -> hc op mapping: pins the scalar/vector dispatch logic in
-import_onnx_to_hc_module -- given a declared shape (scalar [] vs vector [n]),
-does each ONNX op_type map to the right hc op?
+"""ONNX -> hc op mapping: given the declared input shapes (scalar [], vector
+[n], tensor [m, n] or [b, m, n]), each ONNX op_type maps to the right hc op
+variant.
 """
 import pytest
 
@@ -12,7 +12,8 @@ from conftest import entry_op_names  # noqa: E402
 
 
 def _save_one_node_model(tmp_path, op_type, input_specs, output_shape, name="f"):
-    """input_specs: list of (name, shape) -- shape=[] for scalar, [n] for vector."""
+    """Saves a one-node INT32 model and returns its path. `input_specs` is a
+    list of (name, shape)."""
     inputs = [helper.make_tensor_value_info(n, TensorProto.INT32, s) for n, s in input_specs]
     output = helper.make_tensor_value_info("y", TensorProto.INT32, output_shape)
     node = helper.make_node(op_type, [n for n, _ in input_specs], ["y"], name=name)
@@ -74,7 +75,7 @@ def test_batched_mul_tensor_dispatches_to_mul_tensor(tmp_path, ctx):
 
 
 def test_multiple_inputs_all_bound_as_block_args(tmp_path, ctx):
-    """Regression for the old 'assume one scalar input' limitation."""
+    """Every graph input becomes a function argument, not only the first."""
     path = _save_one_node_model(tmp_path, "Add", [("a", []), ("b", [])], [])
     module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
 
