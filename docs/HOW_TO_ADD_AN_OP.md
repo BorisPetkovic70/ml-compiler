@@ -51,17 +51,19 @@ Add a branch in `import_onnx_to_hc_module`'s node loop that recognizes the relev
 if node.op_type == "MatMul":
     a = get(node.input[0])
     b = get(node.input[1])
-    m = _dim_as_int(list(a.type.shape)[0])
-    n = _dim_as_int(list(b.type.shape)[1])
-    res_ty = builtin.TensorType(i32, [m, n])
+    a_dims = [_dim_as_int(d) for d in a.type.shape]
+    b_dims = [_dim_as_int(d) for d in b.type.shape]
+    batch, m = a_dims[:-2], a_dims[-2]
+    n = b_dims[-1]
+    res_ty = builtin.TensorType(i32, batch + [m, n])
     hc = HCMatmul(operands=[a, b], result_types=[res_ty])
     ops.append(hc)
     env[node.output[0]] = hc.results[0]
     continue
 ```
 
-If the op needs a scalar/vector variant split (like `Add`/`Mul`), dispatch on `_is_vec(...)` for
-each operand, following the existing `Add`/`Sub`/`Mul` branches as the pattern.
+If the op has scalar/vector/tensor variants (like `Add`/`Mul`), dispatch on `_is_tensor(...)` /
+`_is_vec(...)` for each operand, following the existing `Add`/`Sub`/`Mul` branches.
 
 ## 3. Lowering (`middle_end/hc_lowering.py`)
 
@@ -80,9 +82,10 @@ if op.name not in (
 **An op name left out of this tuple is not an error — the pattern simply returns without
 touching it, and the unlowered `hc.*` op survives silently into whatever comes next in the
 pipeline**, surfacing as a confusing failure far from the actual cause (usually inside
-bufferization or the backend, which don't recognize `hc.*` ops at all). Add the new op's name to
-this tuple *before* writing its lowering branch, so a missing branch fails immediately as "no
-matching branch" rather than passing through unnoticed.
+bufferization or the backend, which don't recognize `hc.*` ops at all). A name that *is* in the
+tuple but has no branch behaves the same way — the method falls off the end and returns — so
+adding the name first is not a guard by itself. The guard is the `test_lowering.py` assertion
+that no `hc.*` op survives lowering; add the new op to that test.
 
 Then add the branch itself, building the replacement operation(s) and calling
 `rewriter.replace(op, new_ops=[...], new_results=[...], safe_erase=True)` (not the deprecated
@@ -95,8 +98,8 @@ method (`hc.matmul`'s nest is ~40 lines), factor it into a module-level helper f
 Add a branch in `run_block` matching the op's name (for evaluating it directly, before
 lowering) — and, if the lowering introduces operation kinds the interpreter doesn't already
 handle, add support for those too. `hc.matmul`'s addition, for example, required both a native
-`hc.matmul` branch (an independent triple loop, deliberately *not* derived from the lowering, so
-the two can't share a bug) and tensor support in general (`tensor.extract`/`tensor.insert`,
+`hc.matmul` branch (the reference `_matmul`/`_batched_matmul` helpers, deliberately *not*
+derived from the lowering, so the two can't share a bug) and tensor support in general (`tensor.extract`/`tensor.insert`,
 bounds-checked).
 
 ## 5. Tests
@@ -113,8 +116,8 @@ low-friction path for anything that fits the existing shape:
   ../.venv/bin/python -m pytest --cov=hc_dialect --cov-report=term-missing -q
   ```
 
-  and check for any uncovered `raise` line in the new `verify_()`. This repository holds
-  `hc_dialect.py` to 100% line coverage; a new op should not regress that.
+  and check for any uncovered `raise` line in the new `verify_()`. CI fails below 100% line
+  coverage on `hc_dialect.py` (see step 6).
 
 - **`tests/test_lowering.py`** — structural: assert the new op's lowering produces the expected
   operation kinds, and that no `hc.*` op survives. Where a bug could hide behind "the right kind
@@ -132,11 +135,12 @@ low-friction path for anything that fits the existing shape:
 
 ## 6. Verify, then hand off
 
-Run the full suite and the coverage check one more time:
+Run the full suite and CI's coverage gate:
 
 ```bash
 ../.venv/bin/python -m pytest -q
-../.venv/bin/python -m pytest --cov=hc_dialect --cov-report=term-missing -q
+../.venv/bin/python -m pytest --cov=hc_dialect --cov=middle_end.bufferization \
+  --cov=back_end.harness_gen --cov-report=term-missing --cov-fail-under=100 -q
 ```
 
 

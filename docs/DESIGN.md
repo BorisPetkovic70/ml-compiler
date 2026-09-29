@@ -1,204 +1,229 @@
 # Design
 
-This document explains *why* the compiler is structured the way it is — the separation
-between passes, the distinction between value and memory semantics, and the refusal-over-guessing
-philosophy that runs through every pass. For *what* each file does and *how* to run the
-pipeline, see [README.md](../README.md). For a checklist on extending the `hc` dialect, see
-[HOW_TO_ADD_AN_OP.md](HOW_TO_ADD_AN_OP.md).
+How the compiler is structured, and why. For setup and commands see [README.md](../README.md);
+for extending the dialect see [HOW_TO_ADD_AN_OP.md](HOW_TO_ADD_AN_OP.md).
 
-## 1. Why `hc.*` exists above `arith`/`scf`
+## 1. Layers
 
-ONNX describes a computation at the level of named operators over typed tensors — `MatMul`,
-`Relu`, `Add` — with no notion of loops, registers, or memory. `arith`/`scf`/`vector`/`tensor`/
-`memref`, on the other hand, are MLIR's low-level building blocks: arithmetic on SSA values,
-structured control flow, and (eventually) memory. Lowering straight from ONNX into those
-low-level dialects would collapse two genuinely separate decisions into one pass: *what* the
-model computes, and *how* that computation is realized as loops and memory.
+```
+ONNX graph
+  │  front_end/loader.py        which hc op is each ONNX node?
+  ▼
+hc.* dialect                    WHAT is computed (one op per ONNX node)
+  │  middle_end/hc_lowering.py  HOW: loops over values (value semantics)
+  ▼
+arith / scf / vector / tensor
+  │  middle_end/bufferization.py  WHERE: tensors become buffers (memory semantics)
+  ▼
+arith / scf / vector / memref
+  │  back_end/back_end.sh       mlir-opt → mlir-translate → llc → clang
+  ▼
+native executable  (+ back_end/harness_gen.py's generated C main)
+```
 
-`hc` is the layer in between. It is ONNX-shaped (one op per ONNX node, one operand per ONNX
-input) but already xDSL/MLIR IR, so it can be verified, printed, and manipulated with the same
-tools as everything downstream. Splitting the frontend this way means the loader
-(`front_end/loader.py`) only has to answer "which `hc.*` op does this ONNX node become," and
-every question about *how* that op executes is answered later, uniformly, by the lowering pass.
+`hc` exists so that the question "which operation is this?" (the loader's job) is separate from
+"what loops and memory implement it?" (lowering's job). It is ONNX-shaped but already xDSL IR,
+so it can be verified, printed and interpreted with the same tools as everything below it.
 
-## 2. Three value categories, and why they diverge
+Each stage boundary is also a test boundary: the interpreter (§6) runs the IR on both sides of
+a transform, and the results must match.
 
-The dialect (and every pass downstream of it) treats scalars, vectors, and tensors as
-fundamentally different kinds of value, not as one generic "tensor of rank N":
+## 2. Scalars, vectors, tensors
 
-- **Scalars** (`i32`) map directly onto a CPU register and onto `arith`'s scalar ops. There is
-  nothing to lower — `hc.add` becomes `arith.addi` and that's the whole transformation.
-- **Vectors** (`vector<Nxi32>`) map onto a SIMD register. `arith`'s ops already operate
-  element-wise on vector operands when the types match, so most vector lowering is likewise a
-  direct substitution; the one wrinkle is a scalar operand that needs broadcasting into a vector
-  lane count (`hc.mul_vec`, below).
-- **Tensors** (`tensor<MxNxi32>`) have **no hardware counterpart**. A tensor cannot live in a
-  register — it needs to be visited element-by-element, which means it needs a loop, and a loop
-  needs somewhere to read and write, which eventually means memory. This is the fact that
-  produces the rest of this document: `hc.matmul` is the first op in the dialect whose lowering
-  has to *introduce* structure (loops) that wasn't in the source op at all. The tensor elementwise
-  family (`hc.add_tensor`/`sub_tensor`/`mul_tensor`/`relu_tensor`) follows the same pattern —
-  each lowers to a 2-deep `scf.for` nest, one level shallower than matmul's 3-deep nest since a
-  map over every element needs no `k`-reduction.
+These are three separate kinds of value, each with its own op family (`hc.add`, `hc.add_vec`,
+`hc.add_tensor`, …), because each maps onto hardware differently:
 
-This is also why the dialect defines separate op families (`HCAdd`/`HCAddVec`, `HCMul`/
-`HCMulVec`/`HCMulVecVec`) instead of one polymorphic op per operation: each family's `verify_()`
-enforces different invariants (scalar equality vs. vector shape equality vs. rank-2 shape
-compatibility), and conflating them would mean one verifier trying to enforce three unrelated
-sets of rules.
+| Kind | Type | Hardware | Lowering |
+|---|---|---|---|
+| scalar | `i32` | general register | one `arith` op (`hc.add` → `arith.addi`) |
+| vector | `vector<Nxi32>` | SIMD register | one `arith` op; `arith` is already element-wise on vectors. `hc.mul_vec` (scalar × vector) adds a `vector.broadcast` |
+| tensor | `tensor<MxNxi32>`, `tensor<BxMxNxi32>` | none | an `scf.for` loop nest |
 
-## 3. Value semantics vs. memory semantics
+The type constraints (`VecInt`, `TensorInt`) only fix the element type. They do not relate the
+shapes of different operands, so every op with a shape rule (same shape; `MxK · KxN → MxN`; a
+matching batch dim) enforces it in a hand-written `verify_()`. Keeping families separate keeps
+each verifier small.
 
-This is the central distinction in the whole middle end, and it is easiest to see by comparing
-two operations that look similar but are not:
+The tensor ops are the first whose lowering adds structure the source op didn't have:
 
-- **`tensor.insert`** (used by `hc.matmul`'s lowering) has **value semantics**: it takes a
-  tensor and a new element value and returns a *brand-new* tensor with that one element
-  changed. The original tensor is completely unaffected — anyone still holding a reference to it
-  sees the old, unchanged value. This is why the lowered matmul loop nest threads the
-  accumulating result tensor through `iter_args`: each loop iteration's `tensor.insert` produces
-  a new tensor value, which must explicitly be carried into the next iteration, because nothing
-  is being mutated in place.
-- **`memref.store`** (what `tensor.insert` becomes after bufferization) has **memory
-  semantics**: it writes into a buffer in place. Two different SSA values that happen to point
-  at the same underlying buffer will both observe a write made through either one.
+- elementwise (`add/sub/mul/relu_tensor`): `i, j` loops, a map with no reduction.
+- `hc.matmul`: `i, j, k` loops, where `k` is the reduction.
+- rank 3: one outer batch loop around either nest; its induction variable is prepended to every index.
 
-Bufferization (`middle_end/bufferization.py`) is the pass that converts from the first world to
-the second. Its single most visible effect is that the `i`/`j` loops in the matmul nest, which
-previously had to carry the result tensor through `iter_args` because every `tensor.insert`
-produced a new value, no longer carry anything at all — the `memref.store` that replaced
-`tensor.insert` mutates one buffer directly, so there is nothing left to thread between
-iterations. (The innermost `k` loop still carries a scalar accumulator; that is a legitimate
-register-level reduction, not a memory buffer, and is unaffected by bufferization.)
+`hc.max`/`hc.min` lower to `arith.cmpi` + `scf.if`, not `arith.maxsi`/`minsi`. That follows the
+tutorial in `doc_upload/`, which uses them to introduce structured control flow. The
+interpreter's `scf.if` shortcut (§7) relies on this exact shape.
 
-This substitution — a copying `tensor.insert` for an in-place `memref.store` — is only
-correct when the old tensor value is provably dead afterward. If some other, still-live
-reference to the "old" tensor exists, mutating a shared buffer in place would silently change
-what that other reference observes. Section 4 covers how the pass handles this.
+## 3. Value semantics vs memory semantics
 
-## 4. The refusal philosophy
+This is the central idea of the middle end.
 
-**A pass that cannot prove a transformation is safe raises an error, rather than emitting
-code that runs but produces a wrong answer.** This rule shows up in every pass in the
-pipeline, and it is worth stating explicitly because it is the single most consistent design
-decision across the whole codebase.
+- **Value semantics (tensors).** An SSA value is defined once and never changes.
+  `tensor.insert %v into %t[i, j]` does not modify `%t`; it returns a *new* tensor. So a loop
+  that builds a tensor must pass the latest version from one iteration to the next. `scf.for`
+  does this with **`iter_args`**: values the loop body receives, then hands back via
+  `scf.yield`.
+- **Memory semantics (memrefs).** A memref is a buffer. `memref.store` writes into it in place;
+  every value referring to that buffer sees the write.
 
-Concretely, this is where it applies:
+Lowered `hc.matmul` (value semantics), simplified:
 
-- **Bufferization** (`middle_end/bufferization.py::apply_bufferization`) refuses, rather than
-  silently mutating a buffer that might still be needed elsewhere, in three situations: a tensor
-  fed into an insert (or a loop's `iter_arg` init) has more than one use; an insert targets a
-  function argument (there is no caller to prove the original value is no longer needed, since
-  the pipeline only ever has one function per module); or a loop yields a different buffer than
-  the one it carries. None of these fire on `hc.matmul`'s own generated nest — verified
-  empirically that they don't even fire when two `hc.matmul`s are chained and share an
-  intermediate tensor, nor when a *different* op pair is chained (`hc.matmul` feeding
-  `hc.relu_tensor`, see `tests/test_bufferization.py::test_chained_matmul_then_relu_tensor_intermediate_buffer_is_threaded_and_freed`)
-  — but they exist so that a *future*, differently-shaped lowering is caught loudly instead of
-  silently miscompiled.
-- **The harness generator** (`back_end/harness_gen.py`) refuses to generate a C harness for a
-  rank-4+ memref, a non-integer element type, a function that takes a memref argument but
-  returns something other than a memref, or a signature that mixes a vector argument with a
-  memref one. Each of these is a real, distinct C ABI shape — refusing them means a signature
-  the generator doesn't understand produces an error at generation time, not a harness that
-  compiles, links, and prints a wrong number.
-- **The interpreter** (`simulator/interpreter.py`) bounds-checks every tensor/memref index
-  explicitly (Python lists would otherwise silently interpret a negative index as counting from
-  the end), and fills a freshly allocated `memref.alloc` buffer with `None` rather than `0`. Any
-  cell that some bug leaves unwritten then raises a `TypeError` the moment it is used in
-  arithmetic, instead of silently participating in a computation as a plausible-looking zero.
-  `memref.dealloc` similarly deletes the value's binding outright, so a later use of a freed
-  buffer hits the same `KeyError` any other missing-value bug would — no bespoke
-  use-after-free detector needed, just not hiding the mistake.
+```mlir
+%zero = arith.constant dense<0> : tensor<4x4xi32>
+%C = scf.for %i = %c0 to %c4 step %c1 iter_args(%Ci = %zero) -> (tensor<4x4xi32>) {
+  %Cj = scf.for %j = %c0 to %c4 step %c1 iter_args(%Cij = %Ci) -> (tensor<4x4xi32>) {
+    %sum = scf.for %k = %c0 to %c4 step %c1 iter_args(%acc = %c0_i32) -> (i32) {
+      %a = tensor.extract %A[%i, %k] : tensor<4x4xi32>
+      %b = tensor.extract %B[%k, %j] : tensor<4x4xi32>
+      %p = arith.muli %a, %b : i32
+      %s = arith.addi %acc, %p : i32
+      scf.yield %s : i32
+    }
+    %next = tensor.insert %sum into %Cij[%i, %j]
+    scf.yield %next : tensor<4x4xi32>
+  }
+  scf.yield %Cj : tensor<4x4xi32>
+}
+```
 
-Every one of these refusal sites has a negative test asserting the error actually fires (see
-[HOW_TO_ADD_AN_OP.md](HOW_TO_ADD_AN_OP.md) for the pattern to follow when adding a new one).
+After bufferization (memory semantics):
 
-## 5. Verification strategy
+```mlir
+%C = memref.alloc() : memref<4x4xi32>
+scf.for ... { scf.for ... { memref.store %c0_i32, %C[...] } }   // fill with 0
+scf.for %i = %c0 to %c4 step %c1 {
+  scf.for %j = %c0 to %c4 step %c1 {
+    %sum = scf.for %k ... iter_args(%acc = %c0_i32) -> (i32) { ... memref.load ... }
+    memref.store %sum, %C[%i, %j]
+  }
+}
+```
 
-The pipeline has two independent ways to run a model: compile it all the way to a native
-executable through LLVM, or interpret the IR directly in Python
-(`simulator/interpreter.py`). The interpreter is not a fallback or a toy — it is the
-**correctness oracle** the entire test suite is built on, precisely because it needs no LLVM
-toolchain and runs in well under a second for the whole suite.
+The `i`/`j` loops no longer carry anything: every store hits the same buffer. The `k` loop still
+carries its `i32` accumulator, because that is a register-level reduction, not memory.
 
-The verification discipline has stayed consistent across every pass added to this pipeline:
+Replacing a copying insert with an in-place store is only correct if nobody still needs the old
+tensor value. §4 covers how the pass ensures this.
 
-1. **Semantic equality before and after a transform.** Every operator is tested by running the
-   *same* IR through the interpreter before lowering and after lowering (and, for matmul, after
-   bufferization too) and asserting identical results. This is what actually proves a lowering
-   is correct — a structural check can confirm the right *kind* of operations appear, but only a
-   semantic check can catch a lowering that wires them together incorrectly (for example, a
-   loop nest that produces the right operation types but reads from the wrong index).
-2. **An independent ground truth for anything beyond hand-checkable arithmetic.** `hc.matmul`'s
-   correctness is checked against NumPy's `@` operator, not against a second hand-written
-   reference implementation that could share the same bug as the first.
-3. **`module.verify()` after every pass.** `MiddleEndPipeline.apply_passes()` does not verify
-   its own output; the test suite's `conftest.lower()` helper calls `module.verify()`
-   immediately after running the pipeline, specifically so a structurally invalid lowering fails
-   loudly at the point of the bug instead of reaching the interpreter and producing a
-   wrong-but-plausible number.
+## 4. Bufferization (hand-written)
 
+MLIR provides a general pass for this (`one-shot-bufferize`). This project writes its own
+(`middle_end/bufferization.py`) for two reasons:
 
-## 6. The ABI boundary (compiled backend)
+1. **The memref IR has to exist in Python.** The interpreter must execute the bufferized IR
+   to check it against the pre-bufferization result. `harness_gen.py` must see the bufferized
+   entry signature (memref arguments and results) to generate a matching C harness. Both
+   happen before `mlir-opt` ever runs, so bufferizing inside `mlir-opt` would be too late.
+2. **Learning goal.** Writing the tensor→memref conversion by hand is part of the point of the
+   project.
 
-A single static C harness cannot declare a generic `extern` signature that works for every
-model, because the argument and result types genuinely vary (scalar-only, vector-only, memref).
-`back_end/harness_gen.py` instead generates a matching harness per model, and — because the two
-possible ABI shapes are genuinely different calling conventions — it picks between two
-generators based on whether a memref appears anywhere in the signature:
+**What it does**, per function that touches tensors. The body is rebuilt (clone and translate)
+rather than edited in place, because an `scf.for`'s number of `iter_args` can't be changed in place:
 
-- **Register ABI** (no memref anywhere): calls the compiled function directly. Scalars pass as
-  `int`; vectors pass as a GCC `vector_size` value, laid out so they travel in a SIMD register.
-- **C-interface ABI** (any memref in the signature): calls `_mlir_ciface_<fn>`, the wrapper that
-  MLIR's `--llvm-request-c-wrappers` pass emits. This was confirmed against the actual generated
-  LLVM IR rather than assumed from documentation: scalars and vectors are *still* passed by
-  value in this convention, exactly as in the register ABI; only a memref becomes a pointer to a
-  descriptor struct (`{allocated, aligned, offset, sizes[], strides[]}`); and a memref *result*
-  becomes a hidden leading output parameter rather than an ordinary return value, because the
-  descriptor struct is too large to return directly. The callee allocates the result buffer
-  (`memref.alloc` lowers to `malloc`), so the harness is responsible for freeing it.
+| Before | After |
+|---|---|
+| tensor function argument | memref argument (read-only; not owned) |
+| `arith.constant dense<c> : tensor<…>` | `memref.alloc` + a loop nest storing `c` |
+| `tensor.extract %t[idx]` | `memref.load %m[idx]` |
+| `tensor.insert %v into %t[idx]` | `memref.store %v, %m[idx]` |
+| tensor `iter_args` / yields | dropped (scalar ones kept) |
+| returned tensor | returned memref; the **caller owns and frees** it |
+| other allocated buffers | `memref.dealloc` just before `func.return` |
 
-Because bufferization can turn a tensor-typed signature into a memref one, the harness must be
-generated *after* the middle end runs, not before — `hc_main.py` reflects this ordering.
+**It refuses (`NotImplementedError`) instead of guessing when:**
 
-## 7. Known limits, and why each one is a limit rather than a bug
+- the tensor being inserted into, or a loop's tensor `iter_arg` init, has more than one use (an
+  in-place write would be visible to that other use);
+- an insert targets a function argument (it would modify the caller's input);
+- a loop yields a different buffer than the one it carries;
+- the function body has more than one block;
+- a tensor constant sits inside a nested region, or isn't a splat (all elements equal);
+- any other op touches a tensor (for example, an `hc.*` op that was never lowered).
 
-- **Only rank-1, rank-2, and rank-3 (a single leading batch dim) shapes are supported**
-  anywhere memref/tensor types appear (the dialect's own verifiers, the harness generator,
-  bufferization). There is currently no workload that needs a second batch dimension or
-  rank-4+, and generalizing the loop-nest-building and descriptor-struct code further without
-  a concrete test case to validate against would be speculative.
-- **Only `i32`.** No floating-point element type exists anywhere in the pipeline. This is a
-  scope decision, not an oversight — the whole verification chain (interpreter, NumPy
-  comparison, C ABI descriptor structs) currently assumes integer arithmetic.
-- **Only single-block function bodies.** Both the interpreter and bufferization assume a
-  function's body is one straight-line block (with structured control flow — `scf.for`/`scf.if`
-  — nested inside it, which is fine). Nothing in the dialect currently produces unstructured
-  control flow, so this has never been exercised.
-- **No integer overflow modeling.** The interpreter uses Python's arbitrary-precision integers
-  throughout, so an `i32` computation that would wrap around on real hardware simply doesn't in
-  simulation. This is invisible for the shapes and values currently used in tests.
-- **`scf.if` in the interpreter only reads the yielded value; it does not execute the branch's
-  operations.** This is harmless today because `hc.max`/`hc.min`'s lowering (the only source of
-  `scf.if` in the pipeline) yields an already-computed outer value directly from each branch —
-  but it would read a stale value if some future op's lowering computed something *inside* a
-  branch.
-- **Bufferization refuses rather than copies** when it cannot prove an in-place mutation safe
-  (see Section 4). A production version of this pass would resolve each tensor value to a "root"
-  buffer — cheap here, since every value in this IR has exactly one static definition, making it
-  an exact def-chain walk rather than an approximate alias analysis — and insert a `memref.copy`
-  only at the specific point where a write cannot be proven safe. This was designed but not
-  built, since nothing in the current pipeline exercises the aliasing cases it would handle.
-- **The harness generator refuses to mix a vector argument with a memref one.** This is a real,
-  distinct ABI shape (confirmed against generated LLVM IR: a vector argument stays by value even
-  in the C-interface calling convention), but nothing in the current dialect produces a
-  signature that combines the two, so supporting it would be unvalidated by any real model.
-- **The register-ABI's `vector_size` calling convention has a width ceiling.** It is clean for
-  small vector widths that fit in a SIMD register; a large `N` would need the memref/pointer
-  calling convention instead. That convention now *exists* (it was built for tensors), but
-  nothing currently routes an oversized vector through it — the harness generator dispatches
-  purely on whether a `MemRefType` appears in the signature, and a large vector is still a
-  `VectorType`. Wiring "vector too wide for registers" onto the existing memref path is a
-  smaller change than it would have been before the compiled backend existed, but it hasn't
-  been done.
+A production pass would insert a `memref.copy` where this one refuses. None of the refusals
+fire on IR the current lowering produces, including a chained `hc.matmul` → `hc.relu_tensor`.
+
+## 5. Pass ordering and verification
+
+`MiddleEndPipeline.apply_passes` runs: **lowering → bufferization → constant folding → DCE**,
+each switchable via `MiddleEndPipelineConfig`.
+
+- Bufferization needs lowering first: `tensor.*` ops and the zero-initialised result constant
+  only exist after it.
+- DCE runs last so it can remove constants that folding or bufferization left unused.
+- `FoldArithInts` folds `addi`/`subi`/`muli`/`maxsi` on scalar/vector constants and a
+  `vector.broadcast` of a constant. `apply_dce` repeats until nothing changes, removing
+  unused `arith.*`/`vector.broadcast` ops from the function's top-level block.
+
+The pipeline **never calls `module.verify()`**. Whether and when to verify is the caller's
+choice: `tests/conftest.py::lower()` verifies right after the pipeline, while `hc_main.py`
+relies on the interpreter's before/after comparison.
+
+## 6. The ABI boundary
+
+A calling convention (ABI) fixes how arguments and results travel between caller and callee.
+The C harness must declare the compiled function with exactly the right signature, and that
+signature varies per model. So `harness_gen.py` generates one harness per model, choosing
+between two conventions:
+
+- **"Register ABI"** (no memref in the signature): calls `my_func` directly with ordinary
+  by-value C arguments: `int` for scalars, a GCC `vector_size` type for vectors.
+- **C-interface ABI** (any memref): calls `_mlir_ciface_my_func`, a wrapper that
+  `mlir-opt --llvm-request-c-wrappers` generates. Each memref is passed as a pointer to a
+  *descriptor struct* `{allocated, aligned, offset, sizes[R], strides[R]}`. A memref result
+  becomes a hidden first out-parameter, because the struct is too large to return by value.
+  Scalars stay by value. The callee `malloc`s the result, so the harness frees it.
+
+  ```c
+  void _mlir_ciface_my_func(MemRef2D_i32 *result, MemRef2D_i32 *a0, MemRef2D_i32 *a1);
+  ```
+
+Because bufferization changes a tensor signature into a memref one, the harness is generated
+*after* the middle end. The generator raises an error for any shape it doesn't model: a
+memref of rank 0 or ≥4, a non-`i8/16/32/64` element type, a memref argument with a non-memref
+result, or vector and memref arguments mixed.
+
+## 7. The interpreter as oracle
+
+`simulator/interpreter.py` executes `hc`, `arith`, `vector`, `tensor`, `memref` and `scf` directly
+in Python. It needs no toolchain and runs the whole suite in seconds, so every transform is
+checked by it:
+
+1. **Same answer before and after.** Each op runs through the interpreter before and after
+   lowering, and the results must be identical. Matmul (alone and chained into `relu_tensor`)
+   is also run after bufferization. Structural tests can't catch wrong wiring (right ops,
+   wrong indices); this can.
+2. **Independent ground truth.** Matmul results are compared with NumPy, not with a second
+   hand-written implementation that could share a bug. Other ops use hand-computed expected
+   values.
+3. **`module.verify()`** after the pipeline (in tests), so invalid IR fails at the source.
+
+Values: scalars are ints, vectors flat lists, tensors and memrefs nested row-major lists.
+Tensor ops copy; memref ops mutate. The interpreter is built to fail loudly:
+
+- every index is bounds-checked (Python would silently wrap a negative index);
+- `memref.alloc` fills with `None`, so an element nothing ever wrote fails on first arithmetic
+  instead of acting like 0;
+- `memref.dealloc` removes the binding, so use-after-free is a `KeyError`.
+
+Compiled-path tests (`tests/test_compiled_backend.py`) check the executable's output against
+NumPy or plain Python, since the interpreter never runs the ABI path.
+
+## 8. Known limits
+
+Each limit below exists because no current workload needs it, not by accident.
+
+- **`i32` only.** The loader maps every ONNX element type to `i32`. The scalar `hc.relu`/`hc.pow`
+  lowerings hardcode `i32` constants.
+- **Shapes:** rank 0 (scalar), 1 (vector), 2–3 (tensor, one batch dim). A rank-4+ ONNX input
+  becomes a multi-dimensional vector instead of raising an error.
+- **One function, one block, one output.** The loader, bufferization and interpreter all
+  assume this.
+- **No overflow model.** Python ints don't wrap the way `i32` does in hardware.
+- **Interpreter `scf.if`** reads the yielded value without executing the branch body. This is
+  correct only while branches yield already-computed values (true for `hc.max`/`hc.min`).
+- **Bufferization refuses rather than copies** (§4).
+- **Harness:** no vector and memref arguments in the same signature. Large vectors still use the
+  register ABI rather than being routed through the memref convention.
+- **DCE** only scans the function's top-level block, not loop or `if` bodies.
+- **`analysis.py`** (use-def and liveness printing) is wired to a config flag, but no pass uses it.
