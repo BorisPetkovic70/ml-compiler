@@ -190,9 +190,9 @@ in Python. It needs no toolchain and runs the whole suite in seconds, so every t
 checked by it:
 
 1. **Same answer before and after.** Each op runs through the interpreter before and after
-   lowering, and the results must be identical. Matmul (alone and chained into `relu_tensor`)
-   is also run after bufferization. Structural tests can't catch wrong wiring (right ops,
-   wrong indices); this can.
+   lowering, and the results must be identical. Every tensor op (and matmul chained into
+   `relu_tensor`) is also run after bufferization, with and without folding/DCE.
+   Structural tests can't catch wrong wiring (right ops, wrong indices); this can.
 2. **Independent ground truth.** Matmul results are compared with NumPy, not with a second
    hand-written implementation that could share a bug. Other ops use hand-computed expected
    values.

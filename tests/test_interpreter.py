@@ -1,7 +1,9 @@
 """Operator semantics: each op gives the same interpreter result before and
-after lowering (and after bufferization, for matmul), plus unit tests of the
-interpreter's own tensor, memref, and scf.for handling.
+after lowering (and after bufferization, for tensor ops), plus unit tests of
+the interpreter's own tensor, memref, and scf.for handling.
 """
+import copy
+
 import pytest
 
 from xdsl.ir import Block, Region
@@ -204,41 +206,55 @@ def _tensor_binop_module(op_cls, a_vals, b_vals):
      [[[2, 3], [4, 5]], [[2, 3], [4, 5]]],
      [[[2, 6], [12, 20]], [[10, 18], [28, 40]]]),
 ])
-def test_tensor_binop_semantics_before_and_after_lowering(op_cls, a, b, expected):
-    """Tensor binops on 2D and batched 3D nested lists, before and after
-    lowering. Catches an _elt_binop that concatenates rows instead of recursing
-    into them."""
+@pytest.mark.parametrize("fold,dce,bufferize", [
+    (False, False, False), (True, True, False), (False, False, True), (True, True, True),
+])
+def test_tensor_binop_semantics_before_and_after_lowering(op_cls, a, b, expected, fold, dce, bufferize):
+    """Tensor binops on 2D and batched 3D nested lists: native, lowered to a
+    tensor nest, and (with bufferize=True) lowered to a memref nest. Catches an
+    _elt_binop that concatenates rows instead of recursing into them, and a
+    memref nest that writes into its input buffers."""
     m, a_vals, b_vals = _tensor_binop_module(op_cls, a, b)
     args = [a_vals, b_vals]
-    assert run(m, args) == expected
-    lower(m)
-    assert run(m, args) == expected
+    inputs = copy.deepcopy(args)
+    assert run(m, args) == expected                                   # native
+    lower(m, fold=fold, dce=dce, bufferize=bufferize)
+    assert run(m, args) == expected                                   # lowered/bufferized
+    assert args == inputs
 
 
-def test_relu_tensor_semantics_before_and_after_lowering():
+def _relu_tensor_module(*dims: int):
     def body(args):
         (x,) = args
         r = HCReluTensor(operands=[x], result_types=[x.type])
         return [r], r.results[0]
-    m = build_module([tensor_ty(2, 2)], body)
+    return build_module([tensor_ty(*dims)], body)
+
+
+@pytest.mark.parametrize("fold,dce,bufferize", [
+    (False, False, False), (True, True, False), (False, False, True), (True, True, True),
+])
+def test_relu_tensor_semantics_before_and_after_lowering(fold, dce, bufferize):
+    m = _relu_tensor_module(2, 2)
     x = [[-1, 2], [3, -4]]
     expected = [[0, 2], [3, 0]]
     assert run(m, args=[x]) == expected
-    lower(m)
+    lower(m, fold=fold, dce=dce, bufferize=bufferize)
     assert run(m, args=[x]) == expected
+    assert x == [[-1, 2], [3, -4]]
 
 
-def test_relu_tensor_semantics_before_and_after_lowering_batched():
-    def body(args):
-        (x,) = args
-        r = HCReluTensor(operands=[x], result_types=[x.type])
-        return [r], r.results[0]
-    m = build_module([tensor_ty(2, 2, 2)], body)
+@pytest.mark.parametrize("fold,dce,bufferize", [
+    (False, False, False), (True, True, False), (False, False, True), (True, True, True),
+])
+def test_relu_tensor_semantics_before_and_after_lowering_batched(fold, dce, bufferize):
+    m = _relu_tensor_module(2, 2, 2)
     x = [[[-1, 2], [3, -4]], [[5, -6], [-7, 8]]]
     expected = [[[0, 2], [3, 0]], [[5, 0], [0, 8]]]
     assert run(m, args=[x]) == expected
-    lower(m)
+    lower(m, fold=fold, dce=dce, bufferize=bufferize)
     assert run(m, args=[x]) == expected
+    assert x == [[[-1, 2], [3, -4]], [[5, -6], [-7, 8]]]
 
 
 def _matmul_then_relu_module(m: int, k: int, n: int, batch: int | None = None):
