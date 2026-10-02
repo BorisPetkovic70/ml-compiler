@@ -9,10 +9,9 @@ from pathlib import Path
 import pytest
 
 from xdsl.context import Context
-from xdsl.ir import Region, Block
 from xdsl.parser import Parser
 from xdsl.dialects.builtin import (
-    Builtin, ModuleOp, i32, IntegerType, VectorType, TensorType,
+    Builtin, ModuleOp, IntegerType, VectorType, TensorType,
     DenseIntOrFPElementsAttr,
 )
 from xdsl.dialects import func, arith, memref, scf, tensor, vector
@@ -83,27 +82,17 @@ def const_vec(values: list[int]) -> arith.ConstantOp:
     return arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(ty, values))
 
 
-def build_module(arg_types, body, name: str = "my_func") -> ModuleOp:
-    """body(block_args) -> (ops_to_insert, return_value)."""
-    block = Block(arg_types=list(arg_types))
-    ops, ret = body(list(block.args))
-    for op in ops:
-        block.add_op(op)
-    block.add_op(func.ReturnOp(ret))
-    fn = func.FuncOp(name, (list(arg_types), [ret.type]), region=Region(block))
-    return ModuleOp(ops=[fn])
-
-
 def run(module: ModuleOp, args=(), func_name: str = "my_func"):
     return Interpreter().run_module(module, args=list(args), func_name=func_name)
 
 
-def lower(module: ModuleOp, fold: bool = False, dce: bool = False, bufferize: bool = False) -> ModuleOp:
+def lower(module: ModuleOp) -> ModuleOp:
+    """Runs only the lowering pass, then verifies the module."""
     cfg = MiddleEndPipelineConfig(
         apply_lowering=True,
-        apply_bufferization=bufferize,
-        apply_constant_folding=fold,
-        apply_dce=dce,
+        apply_bufferization=False,
+        apply_constant_folding=False,
+        apply_dce=False,
         run_analysis=False,
         debug_mode=False,
     )
@@ -134,10 +123,3 @@ def find_op(module: ModuleOp, op_name: str, func_name: str = "my_func"):
         if op.name == op_name:
             return op
     return None
-
-
-def find_ops(module: ModuleOp, op_name: str, func_name: str = "my_func") -> list:
-    """Every op with the given name anywhere under the entry function, in
-    pre-order -- unlike find_op, this reaches ops nested inside scf.for bodies."""
-    fn = _entry_fn(module, func_name)
-    return [op for op in fn.walk() if op.name == op_name]
