@@ -22,4 +22,4 @@ jobs:
       - name: Run tests with coverage gate
         run: |
           python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
-            --cov=simulator --cov-report=term-missing --cov-fail-under=80 -q
+            --cov=simulator --cov-report=term-missing --cov-fail-under=85 -q

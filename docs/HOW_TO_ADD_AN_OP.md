@@ -84,8 +84,9 @@ touching it, and the unlowered `hc.*` op survives silently into whatever comes n
 pipeline**, surfacing as a confusing failure far from the actual cause (usually inside
 bufferization or the backend, which don't recognize `hc.*` ops at all). A name that *is* in the
 tuple but has no branch behaves the same way — the method falls off the end and returns — so
-adding the name first is not a guard by itself. The guard is the `test_lowering.py` assertion
-that no `hc.*` op survives lowering; add the new op to that test.
+adding the name first is not a guard by itself. The guard is `check_lowering()` in
+`test_lowering.py`, which checks that no `hc.` op survives lowering; give the new op a test
+there (step 5).
 
 Then add the branch itself, building the replacement operation(s) and calling
 `rewriter.replace(op, new_ops=[...], new_results=[...], safe_erase=True)` (not the deprecated
@@ -104,43 +105,44 @@ bounds-checked).
 
 ## 5. Tests
 
-Follow the existing three-file, three-level pattern — add one row to each relevant
-parametrized table rather than writing a whole new test function; this is the intended
-low-friction path for anything that fits the existing shape:
+A new op gets three tests, each in an existing file. If the op has the same shape as an
+existing one, each test is just a new row in a parametrized table.
 
-- **`tests/test_dialect.py`** — construction plus `verify_()`. If the op has a `verify_()`
-  (most do), add both a positive case and a negative (`pytest.raises`) case *for every distinct
-  raise branch*. After adding the tests, run:
+- **`tests/test_dialect.py`:** a positive case that builds and verifies the op, and a negative
+  case (`pytest.raises`) that its `verify_()` rejects.
 
-  ```bash
-  ../.venv/bin/python -m pytest --cov=hc_dialect --cov-report=term-missing -q
+- **`tests/test_lowering.py`:** one FileCheck test. Write the op in generic form, run it
+  through `check_lowering`, and match the lowered IR with `// CHECK:` lines. Captures such as
+  `%[[ZERO:.*]]` show how the new ops are wired together. `check_lowering` also checks that no
+  `hc.` op survives (step 3's guard). The `hc.relu` test:
+
+  ```python
+  def test_relu():
+      check_lowering("""
+      func.func @f(%x: i32) -> i32 {
+        %r = "hc.relu"(%x) : (i32) -> i32
+        func.return %r : i32
+      }""", """
+      // CHECK: %[[ZERO:.*]] = arith.constant 0 : i32
+      // CHECK: %[[R:.*]] = arith.maxsi %x, %[[ZERO]] : i32
+      // CHECK: func.return %[[R]] : i32
+      """)
   ```
 
-  and check for any uncovered `raise` line in the new `verify_()`. CI fails below 100% line
-  coverage on `hc_dialect.py` (see step 6).
+- **`tests/test_oracle.py`:** one row, for example `("hc.relu", "i32", -3, 0)`, or a short
+  `check_oracle` test. The interpreter runs the op before and after the whole middle end, and
+  both results must equal the expected value. A CHECK test shows what the lowering emits; this
+  shows that it computes the right thing. Where NumPy has a reference (as for `hc.matmul`),
+  compare against it rather than a hand-written implementation that could share a bug.
 
-- **`tests/test_lowering.py`** — structural: assert the new op's lowering produces the expected
-  operation kinds, and that no `hc.*` op survives. Where a bug could hide behind "the right kind
-  of operation is present but wired up wrong" (a common failure mode — see `hc.matmul`'s own
-  wiring tests, which check load/store indices by identity against the actual loop induction
-  variables, not just that `tensor.extract` appears somewhere), assert on the actual operation's
-  attributes/operands via `find_op`/`find_ops`, not just membership in `entry_op_names`.
-
-- **`tests/test_interpreter.py`** — semantic: run the same IR through the interpreter *before*
-  and *after* lowering and assert identical results. This is what actually proves the lowering
-  correct, not merely plausible — a structural check can confirm the right operations appear
-  without confirming they're wired together correctly. If a NumPy-comparable reference exists
-  (as for `hc.matmul`), gate against that instead of a second hand-written implementation, to
-  avoid both sides sharing the same bug.
-
-## 6. Verify, then hand off
+## 6. Verify
 
 Run the full suite and CI's coverage gate:
 
 ```bash
 ../.venv/bin/python -m pytest -q
-../.venv/bin/python -m pytest --cov=hc_dialect --cov=middle_end.bufferization \
-  --cov=back_end.harness_gen --cov-report=term-missing --cov-fail-under=100 -q
+../.venv/bin/python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
+  --cov=simulator --cov-report=term-missing --cov-fail-under=85 -q
 ```
 
 

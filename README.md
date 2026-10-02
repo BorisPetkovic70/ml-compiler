@@ -34,12 +34,26 @@ and `clang`. Nothing else does.
 ## Test
 
 ```bash
-python -m pytest -q                # whole suite, no LLVM needed
+python -m pytest -q                          # whole suite, no LLVM needed
+python -m pytest -q tests/test_lowering.py   # one file
 
-# CI's gate: at least 80% line coverage
+# CI's gate: at least 85% line coverage
 python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
-  --cov=simulator --cov-report=term-missing --cov-fail-under=80 -q
+  --cov=simulator --cov-report=term-missing --cov-fail-under=85 -q
 ```
+
+The suite tests the compiler in two ways:
+
+- **FileCheck pass tests** (`test_lowering.py`, `test_bufferization.py`,
+  `test_constant_folding.py`, `test_dce.py`, `test_harness_gen.py`): a small IR string goes
+  through one pass (or the harness generator), and the printed output, IR or C, is matched
+  against `// CHECK:` lines. They show *what* a pass emits.
+- **Oracle tests** (`test_oracle.py`): the interpreter runs an `hc` function before and after
+  the middle end, and both results must equal a hand-computed value or NumPy's. They show that
+  the emitted code is *correct*.
+
+`test_dialect.py` checks each op's verifier, `test_loader.py` the ONNX import, and
+`test_interpreter.py` the interpreter itself.
 
 `tests/test_compiled_backend.py` compiles and runs real executables. It is skipped unless
 `mlir-opt`, `mlir-translate`, `llc` and `clang` are all on `PATH` (so it is always skipped in CI).

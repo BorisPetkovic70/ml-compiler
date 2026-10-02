@@ -189,10 +189,10 @@ result, or vector and memref arguments mixed.
 in Python. It needs no toolchain and runs the whole suite in seconds, so every transform is
 checked by it:
 
-1. **Same answer before and after.** Each op runs through the interpreter before and after
-   lowering, and the results must be identical. Every tensor op (and matmul chained into
-   `relu_tensor`) is also run after bufferization, with and without folding/DCE.
-   Structural tests can't catch wrong wiring (right ops, wrong indices); this can.
+1. **Same answer before and after.** `tests/test_oracle.py` runs each op through the
+   interpreter before and after the whole middle end, and both results must equal the
+   expected value. A FileCheck test shows which ops a pass emits, not that they compute the
+   right result; this does.
 2. **Independent ground truth.** Matmul results are compared with NumPy, not with a second
    hand-written implementation that could share a bug. Other ops use hand-computed expected
    values.
@@ -206,8 +206,14 @@ Tensor ops copy; memref ops mutate. The interpreter is built to fail loudly:
   instead of acting like 0;
 - `memref.dealloc` removes the binding, so use-after-free is a `KeyError`.
 
-Compiled-path tests (`tests/test_compiled_backend.py`) check the executable's output against
-NumPy or plain Python, since the interpreter never runs the ABI path.
+The suite has three layers:
+
+- **FileCheck pass tests** run one pass on a small IR string and match the printed output
+  against `// CHECK:` lines. They show *what* a pass emits.
+- **Oracle tests** run the interpreter before and after the middle end. They show that the
+  emitted code computes the right thing.
+- **Compiled-path tests** (`tests/test_compiled_backend.py`) check the executable's output
+  against NumPy or plain Python, since the interpreter never runs the ABI path.
 
 ## 8. Known limits
 
