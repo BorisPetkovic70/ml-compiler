@@ -47,15 +47,16 @@ def filecheck(output, checks: str) -> None:
     """Runs FileCheck: matches the `// CHECK:` lines in `checks`, in order,
     against `output` (a module or text). Fails the test with FileCheck's
     message on a mismatch."""
+    text = str(output)
     with tempfile.TemporaryDirectory() as d:
         check_file = Path(d) / "checks"
         check_file.write_text(checks)
         proc = subprocess.run(
             [sys.executable, "-m", "filecheck", str(check_file)],
-            input=str(output), capture_output=True, text=True,
+            input=text, capture_output=True, text=True,
         )
     if proc.returncode != 0:
-        pytest.fail(f"FileCheck failed:\n{proc.stderr}\n--- output ---\n{output}",
+        pytest.fail(f"FileCheck failed:\n{proc.stderr}\n--- output ---\n{text}",
                     pytrace=False)
 
 
