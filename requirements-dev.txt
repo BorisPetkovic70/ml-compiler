@@ -1,3 +1,6 @@
+xdsl==0.70.0
+onnx==1.22.0
 pytest
 pytest-cov
 numpy
+filecheck==1.0.6

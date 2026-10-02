@@ -1,27 +1,62 @@
-"""Shared test helpers: module building, running, and lowering without a
-compiled toolchain -- everything here executes through the pure-Python
-interpreter or plain xDSL construction/verification.
+"""Shared test helpers: parsing IR text, FileCheck, building, running and
+lowering modules. Nothing here needs the LLVM toolchain.
 """
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from xdsl.context import Context
 from xdsl.ir import Region, Block
+from xdsl.parser import Parser
 from xdsl.dialects.builtin import (
     Builtin, ModuleOp, i32, IntegerType, VectorType, TensorType,
     DenseIntOrFPElementsAttr,
 )
-from xdsl.dialects import func, arith
+from xdsl.dialects import func, arith, memref, scf, tensor, vector
 from hc_dialect import HiCompiler
 from middle_end.pipeline import MiddleEndPipeline, MiddleEndPipelineConfig
 from simulator.interpreter import Interpreter
 
 
-@pytest.fixture(scope="session")
-def ctx() -> Context:
+def _make_ctx() -> Context:
     c = Context()
-    for d in (Builtin, func.Func, arith.Arith, HiCompiler):
+    for d in (Builtin, func.Func, arith.Arith, scf.Scf, tensor.Tensor,
+              memref.MemRef, vector.Vector, HiCompiler):
         c.load_dialect(d)
     return c
+
+
+_CTX = _make_ctx()
+
+
+@pytest.fixture(scope="session")
+def ctx() -> Context:
+    return _CTX
+
+
+def parse(ir: str) -> ModuleOp:
+    """Parses MLIR text into a module. `hc` ops are written in generic form,
+    e.g. `%c = "hc.add"(%a, %b) : (i32, i32) -> i32`."""
+    return Parser(_CTX, ir).parse_module()
+
+
+def filecheck(output, checks: str) -> None:
+    """Runs FileCheck: matches the `// CHECK:` lines in `checks`, in order,
+    against `output` (a module or text). Fails the test with FileCheck's
+    message on a mismatch."""
+    with tempfile.TemporaryDirectory() as d:
+        check_file = Path(d) / "checks"
+        check_file.write_text(checks)
+        proc = subprocess.run(
+            [sys.executable, "-m", "filecheck", str(check_file)],
+            input=str(output), capture_output=True, text=True,
+        )
+    if proc.returncode != 0:
+        pytest.fail(f"FileCheck failed:\n{proc.stderr}\n--- output ---\n{output}",
+                    pytrace=False)
 
 
 def vec_ty(n: int, width: int = 32) -> VectorType:

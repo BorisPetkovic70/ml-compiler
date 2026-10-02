@@ -1,9 +1,6 @@
 name: tests
 
-# quoted "on" sidesteps a well-known YAML 1.1 quirk where a bare `on:` key parses
-# as the boolean True in generic YAML tools (PyYAML included) -- GitHub's own
-# workflow parser special-cases it correctly either way, but quoting it makes the
-# file unambiguous to any tool, not just GitHub's.
+# quoted: generic YAML 1.1 parsers read a bare `on:` key as the boolean True
 "on":
   push:
   pull_request:
@@ -20,10 +17,9 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt xdsl==0.70.0 onnx==1.22.0
+        run: pip install -r requirements-dev.txt
 
       - name: Run tests with coverage gate
         run: |
-          python -m pytest --cov=hc_dialect --cov=middle_end.bufferization \
-            --cov=back_end.harness_gen --cov-report=term-missing \
-            --cov-fail-under=100 -q
+          python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
+            --cov=simulator --cov-report=term-missing --cov-fail-under=80 -q

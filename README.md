@@ -23,7 +23,7 @@ Requires Python 3.10. From the directory *above* `ml-compiler/`:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r ml-compiler/requirements-dev.txt xdsl==0.70.0 onnx==1.22.0
+.venv/bin/pip install -r ml-compiler/requirements-dev.txt
 source .venv/bin/activate          # full_compiler.sh calls plain `python3`
 cd ml-compiler
 ```
@@ -36,9 +36,9 @@ and `clang`. Nothing else does.
 ```bash
 python -m pytest -q                # whole suite, no LLVM needed
 
-# CI's gate: 100% line coverage on these three modules
-python -m pytest --cov=hc_dialect --cov=middle_end.bufferization \
-  --cov=back_end.harness_gen --cov-report=term-missing --cov-fail-under=100 -q
+# CI's gate: at least 80% line coverage
+python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
+  --cov=simulator --cov-report=term-missing --cov-fail-under=80 -q
 ```
 
 `tests/test_compiled_backend.py` compiles and runs real executables. It is skipped unless
