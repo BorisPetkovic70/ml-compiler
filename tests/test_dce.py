@@ -1,45 +1,45 @@
-"""Dead code elimination: unused arith ops (and vector.broadcast) are
-removed; used ops and func.return survive."""
-from xdsl.dialects.builtin import i32
-from xdsl.dialects import arith, vector
-
-from conftest import build_module, const_i32, vec_ty, lower, entry_op_names, run
-
-
-def test_unused_arith_op_is_removed():
-    def body(_args):
-        used = const_i32(5)
-        unused = const_i32(999)  # never consumed
-        return [used, unused], used.result
-
-    m = build_module([], body)
-    lower(m, dce=True)
-    names = entry_op_names(m)
-    assert names.count("arith.constant") == 1
-    assert run(m) == 5
+"""FileCheck tests for dead code elimination: each test parses a small
+function, runs only `apply_dce`, and matches the printed IR against its
+`// CHECK:` lines. The CHECK-NEXT chains show that nothing else survives.
+"""
+from conftest import parse, filecheck
+from middle_end.dead_code_elimination import apply_dce
 
 
-def test_used_op_survives_dce():
-    def body(_args):
-        c1, c2 = const_i32(3), const_i32(4)
-        add = arith.AddiOp(c1.result, c2.result)
-        return [c1, c2, add], add.result
-
-    m = build_module([], body)
-    lower(m, dce=True)
-    assert "arith.addi" in entry_op_names(m)
-    assert run(m) == 7
+def dce(ir: str):
+    module = parse(ir)
+    apply_dce(module)
+    module.verify()
+    return module
 
 
-def test_unused_vector_broadcast_is_removed():
-    """A broadcast whose source is a runtime value (survives folding) but
-    whose result is never used should still be dropped by DCE."""
-    def body(args):
-        (s,) = args
-        bcast = vector.BroadcastOp(s, vec_ty(4))
-        return [bcast], s
+def test_dead_chain_is_removed_and_used_ops_stay():
+    """`%dead` has no uses, and once it is gone neither do `%a` and `%b`.
+    `%one` and `%r` feed the return, so they stay."""
+    filecheck(dce("""
+    func.func @f(%x: i32) -> i32 {
+      %a = arith.constant 3 : i32
+      %b = arith.constant 4 : i32
+      %dead = arith.addi %a, %b : i32
+      %one = arith.constant 1 : i32
+      %r = arith.addi %x, %one : i32
+      func.return %r : i32
+    }"""), """
+    // CHECK: func.func @f(%x: i32) -> i32 {
+    // CHECK-NEXT: %one = arith.constant 1 : i32
+    // CHECK-NEXT: %r = arith.addi %x, %one : i32
+    // CHECK-NEXT: func.return %r : i32
+    """)
 
-    m = build_module([i32], body)
-    lower(m, dce=True)
-    assert "vector.broadcast" not in entry_op_names(m)
-    assert run(m, args=[7]) == 7
+
+def test_unused_broadcast_is_removed():
+    """Constant folding can't remove this broadcast, because `%x` is only
+    known at run time. Its result is unused, so DCE does."""
+    filecheck(dce("""
+    func.func @f(%x: i32) -> i32 {
+      %v = vector.broadcast %x : i32 to vector<4xi32>
+      func.return %x : i32
+    }"""), """
+    // CHECK: func.func @f(%x: i32) -> i32 {
+    // CHECK-NEXT: func.return %x : i32
+    """)
