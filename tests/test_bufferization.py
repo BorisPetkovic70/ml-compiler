@@ -111,6 +111,58 @@ def test_temporary_buffer_is_deallocated():
     """)
 
 
+def test_weight_constant_becomes_a_read_only_global():
+    """A constant with different values (a weight) becomes a module-level
+    `memref.global constant`, read through `memref.get_global`. The data
+    lives in the executable, so the buffer is never deallocated. xDSL prints
+    `memref.global` in generic form."""
+    check_bufferization("""
+    func.func @f() -> i32 {
+      %c0 = arith.constant 0 : index
+      %c1 = arith.constant 1 : index
+      %w = arith.constant dense<[[1, 2], [3, 4]]> : tensor<2x2xi32>
+      %x = tensor.extract %w[%c0, %c1] : tensor<2x2xi32>
+      func.return %x : i32
+    }""", """
+    // CHECK: "memref.global"() <{sym_name = "__constant_0", type = memref<2x2xi32>, initial_value = dense<{{\\[\\[}}1, 2], [3, 4]]> : tensor<2x2xi32>, sym_visibility = "private", constant}>
+    // CHECK: func.func @f() -> i32
+    // CHECK: %[[W:.*]] = memref.get_global @__constant_0 : memref<2x2xi32>
+    // CHECK-NEXT: %[[X:.*]] = memref.load %[[W]][%c0, %c1] : memref<2x2xi32>
+    // CHECK-NOT: memref.dealloc
+    // CHECK: func.return %[[X]] : i32
+    """)
+
+
+def test_refuses_insert_into_a_weight_constant():
+    """A store into the global would write to the executable's read-only
+    data, so the pass refuses, as it does for a function argument."""
+    with pytest.raises(NotImplementedError, match="not owned"):
+        bufferize("""
+        func.func @f() -> i32 {
+          %c0 = arith.constant 0 : index
+          %v = arith.constant 9 : i32
+          %w = arith.constant dense<[[1, 2], [3, 4]]> : tensor<2x2xi32>
+          %w2 = tensor.insert %v into %w[%c0, %c0] : tensor<2x2xi32>
+          %x = tensor.extract %w2[%c0, %c0] : tensor<2x2xi32>
+          func.return %x : i32
+        }""")
+
+
+def test_returned_argument_is_copied():
+    """The caller frees the returned buffer, and it also frees its own input.
+    Returning the input buffer itself would free it twice, so the pass
+    returns a fresh copy that the caller owns."""
+    check_bufferization("""
+    func.func @f(%a: tensor<2x2xi32>) -> tensor<2x2xi32> {
+      func.return %a : tensor<2x2xi32>
+    }""", """
+    // CHECK: func.func @f(%[[A:.*]]: memref<2x2xi32>) -> memref<2x2xi32>
+    // CHECK-NEXT: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: "memref.copy"(%[[A]], %[[COPY]]) : (memref<2x2xi32>, memref<2x2xi32>) -> ()
+    // CHECK-NEXT: func.return %[[COPY]] : memref<2x2xi32>
+    """)
+
+
 def test_scalar_argument_keeps_its_type():
     """Only tensor types become memrefs. The i32 argument and result pass
     through unchanged, and `%s` still feeds the `arith.addi`."""

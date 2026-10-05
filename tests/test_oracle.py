@@ -94,6 +94,28 @@ def test_matmul_matches_numpy(a_shape, b_shape):
     }}""", [a.tolist(), b.tolist()], r.tolist())
 
 
+def test_matmul_with_weight_constant_matches_numpy():
+    """`%w` is a weight, as the loader builds it from an ONNX initializer.
+    After bufferization it is read from a `memref.global`."""
+    x = np.array([[1, 2], [3, 4]])
+    w = np.array([[1, 2, 3], [4, 5, 6]])
+    check_oracle("""
+    func.func @f(%x: tensor<2x2xi32>) -> tensor<2x3xi32> {
+      %w = arith.constant dense<[[1, 2, 3], [4, 5, 6]]> : tensor<2x3xi32>
+      %r = "hc.matmul"(%x, %w) : (tensor<2x2xi32>, tensor<2x3xi32>) -> tensor<2x3xi32>
+      func.return %r : tensor<2x3xi32>
+    }""", [x.tolist()], (x @ w).tolist())
+
+
+def test_returned_input_is_a_copy():
+    """After bufferization the function returns a copy of its input buffer
+    (`memref.copy`), with the same values."""
+    check_oracle("""
+    func.func @f(%a: tensor<2x2xi32>) -> tensor<2x2xi32> {
+      func.return %a : tensor<2x2xi32>
+    }""", [[[1, 2], [3, 4]]], [[1, 2], [3, 4]])
+
+
 def test_matmul_then_relu_matches_numpy():
     """The matmul's result feeds the relu's loop nest. After bufferization
     it is a temporary buffer."""

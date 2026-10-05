@@ -41,11 +41,13 @@ ${TOOLCHAIN_BIN_DIR}/mlir-translate ${BUILD_DIR}/${MODEL_STEM}_llvm.mlir \
     -mlir-to-llvmir -o ${BUILD_DIR}/${MODEL_STEM}_out.ll
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.ll"
 
-${TOOLCHAIN_BIN_DIR}/llc -O2 -filetype=asm \
+# -relocation-model=pic: clang links a position-independent executable by default,
+# so references to global data (weights in memref.global) must be PC-relative.
+${TOOLCHAIN_BIN_DIR}/llc -O2 -relocation-model=pic -filetype=asm \
     ${BUILD_DIR}/${MODEL_STEM}_out.ll -o ${BUILD_DIR}/${MODEL_STEM}_out.s
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.s"
 
-${TOOLCHAIN_BIN_DIR}/llc -filetype=obj ${BUILD_DIR}/${MODEL_STEM}_out.ll \
+${TOOLCHAIN_BIN_DIR}/llc -relocation-model=pic -filetype=obj ${BUILD_DIR}/${MODEL_STEM}_out.ll \
     -o ${BUILD_DIR}/${MODEL_STEM}_out.o
 echo "Created file: ${BUILD_DIR}/${MODEL_STEM}_out.o"
 

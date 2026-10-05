@@ -123,25 +123,32 @@ rather than edited in place, because an `scf.for`'s number of `iter_args` can't 
 | Before | After |
 |---|---|
 | tensor function argument | memref argument (read-only; not owned) |
-| `arith.constant dense<c> : tensor<…>` | `memref.alloc` + a loop nest storing `c` |
+| splat `arith.constant dense<c> : tensor<…>` | `memref.alloc` + a loop nest storing `c` |
+| other tensor constant (a weight) | module-level `memref.global constant` + `memref.get_global` (read-only; not owned) |
 | `tensor.extract %t[idx]` | `memref.load %m[idx]` |
 | `tensor.insert %v into %t[idx]` | `memref.store %v, %m[idx]` |
 | tensor `iter_args` / yields | dropped (scalar ones kept) |
-| returned tensor | returned memref; the **caller owns and frees** it |
+| returned tensor | returned memref; the **caller owns and frees** it. A buffer the function doesn't own (an argument or a weight) is first copied into a new one (`memref.alloc` + `memref.copy`) |
 | other allocated buffers | `memref.dealloc` just before `func.return` |
+
+So a buffer is one of three kinds: an input (the caller's), a temporary this pass allocated
+(owned), or a weight in the executable's read-only data. Only owned buffers are written to or
+deallocated.
 
 **It refuses (`NotImplementedError`) instead of guessing when:**
 
 - the tensor being inserted into, or a loop's tensor `iter_arg` init, has more than one use (an
   in-place write would be visible to that other use);
-- an insert targets a function argument (it would modify the caller's input);
+- an insert targets a buffer the function doesn't own: an argument (it would modify the
+  caller's input) or a weight (it would write to read-only data);
 - a loop yields a different buffer than the one it carries;
 - the function body has more than one block;
-- a tensor constant sits inside a nested region, or isn't a splat (all elements equal);
+- a tensor constant sits inside a nested region;
 - any other op touches a tensor (for example, an `hc.*` op that was never lowered).
 
 A production pass would insert a `memref.copy` where this one refuses. None of the refusals
-fire on IR the current lowering produces, including a chained `hc.matmul` → `hc.relu_tensor`.
+fire on IR the current lowering produces, including a chained `hc.matmul` → `hc.relu_tensor`
+and a matmul with a weight.
 
 ## 5. Pass ordering and verification
 
@@ -182,6 +189,10 @@ Because bufferization changes a tensor signature into a memref one, the harness 
 *after* the middle end. The generator raises an error for any shape it doesn't model: a
 memref of rank 0 or ≥4, a non-`i8/16/32/64` element type, a memref argument with a non-memref
 result, or vector and memref arguments mixed.
+
+Weights (`memref.global`) live in the executable's read-only data. clang links a
+position-independent executable by default, so `back_end.sh` runs `llc` with
+`-relocation-model=pic`; without it, the link fails on the reference to that data.
 
 ## 7. The interpreter as oracle
 
@@ -228,7 +239,8 @@ Each limit below exists because no current workload needs it, not by accident.
 - **No overflow model.** Python ints don't wrap the way `i32` does in hardware.
 - **Interpreter `scf.if`** reads the yielded value without executing the branch body. This is
   correct only while branches yield already-computed values (true for `hc.max`/`hc.min`).
-- **Bufferization refuses rather than copies** (§4).
+- **Bufferization refuses rather than copies** before an in-place write (§4). It copies only a
+  returned buffer the function doesn't own.
 - **Harness:** no vector and memref arguments in the same signature. Large vectors still use the
   register ABI rather than being routed through the memref convention.
 - **DCE** only scans the function's top-level block, not loop or `if` bodies.

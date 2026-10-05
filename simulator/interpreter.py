@@ -157,6 +157,15 @@ def _memref_store(buf: list, indices: list[int], value) -> None:
     buf[indices[-1]] = value
 
 
+def _memref_copy(src: list, dst: list) -> None:
+    """Copies every element of `src` into `dst`, in place."""
+    for i, item in enumerate(src):
+        if isinstance(item, list):
+            _memref_copy(item, dst[i])
+        else:
+            dst[i] = item
+
+
 def _matmul(a: list, b: list) -> list:
     """Reference (MxK) @ (KxN) -> (MxN), deliberately independent of the lowering."""
     k = len(b)
@@ -183,6 +192,8 @@ class Interpreter:
     def __init__(self):
         # SSAValue is not always hashable across versions -> use id()
         self.env: dict[int, object] = {}
+        # module-level memref.global ops, by symbol name
+        self.globals: dict[str, Operation] = {}
 
     def _get(self, v: SSAValue):
         return self.env[id(v)]
@@ -293,6 +304,17 @@ class Interpreter:
                 buf = self._get(op.memref)
                 idx = [self._get(i) for i in op.indices]
                 _memref_store(buf, idx, self._get(op.value))
+                continue
+
+            if name == "memref.get_global":
+                # A fresh nested list on every read: the global's data never changes.
+                glob = self.globals[op.name_.root_reference.data]
+                shape = _tensor_shape(glob.type)
+                self._set(op.results[0], _reshape(list(glob.initial_value.get_values()), shape))
+                continue
+
+            if name == "memref.copy":
+                _memref_copy(self._get(op.source), self._get(op.destination))
                 continue
 
             if name == "memref.dealloc":
@@ -429,6 +451,8 @@ class Interpreter:
                 A list containing the return value of each function invocation,
                 in the same order as `batch_args`.
       """
+
+        self.globals = {op.sym_name.data: op for op in module.ops if op.name == "memref.global"}
 
         # module.body.blocks[0].ops usually contains top-level ops
         for top_block in module.body.blocks:

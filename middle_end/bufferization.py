@@ -3,9 +3,12 @@ ownership rules, and full refusal list are in docs/DESIGN.md Section 4.
 
 `apply_bufferization` rewrites each tensor-using func.func in place:
 - tensors become memrefs;
-- tensor constants become `memref.alloc` plus a fill loop nest;
+- splat tensor constants become `memref.alloc` plus a fill loop nest;
+- other tensor constants (weights) become a read-only `memref.global`;
 - extract/insert become load/store;
 - tensor `iter_args` are dropped;
+- a returned buffer the function doesn't own (an argument or a weight) is
+  copied, so the caller always owns what it gets back;
 - every allocated buffer that isn't returned is deallocated before
   `func.return`.
 
@@ -18,7 +21,9 @@ because `scf.for` can't change its iter_arg count in place. Reading from the
 untouched old block also keeps use counts accurate for the single-use checks.
 """
 from xdsl.dialects import arith, func, memref, scf
-from xdsl.dialects.builtin import FunctionType, IndexType, MemRefType, ModuleOp, TensorType
+from xdsl.dialects.builtin import (
+    FunctionType, IndexType, MemRefType, ModuleOp, StringAttr, TensorType, UnitAttr,
+)
 from xdsl.ir import Block, Operation, Region, SSAValue
 
 
@@ -28,7 +33,7 @@ def apply_bufferization(module: ModuleOp) -> None:
     for top_block in module.body.blocks:
         for op in list(top_block.ops):
             if isinstance(op, func.FuncOp) and _uses_tensors(op):
-                _Bufferizer(op).run()
+                _Bufferizer(op, module).run()
 
 
 # -----------------------------------------------------------------------------
@@ -97,8 +102,9 @@ class _Bufferizer:
     """Bufferizes one single-block func.func; `run()` replaces its body and
     updates its function type."""
 
-    def __init__(self, fn: func.FuncOp):
+    def __init__(self, fn: func.FuncOp, module: ModuleOp):
         self.fn = fn
+        self.module = module
         # old non-tensor SSA value -> new value; also the value_mapper handed to clone()
         self.vmap: dict[SSAValue, SSAValue] = {}
         # old tensor SSA value -> the memref that now holds it
@@ -160,19 +166,32 @@ class _Bufferizer:
         # mapped to a buffer.
         return self.bufs[value]
 
-    # ---- tensor constant -> alloc + fill ---------------------------------------
+    # ---- tensor constant -> alloc + fill, or a read-only global -----------------
     def _tensor_constant(self, op: arith.ConstantOp, new_block: Block) -> None:
         if new_block is not self.entry:
             raise NotImplementedError("bufferization: tensor constants inside a nested region")
         values = list(op.value.get_values())
-        if len(set(values)) != 1:
-            raise NotImplementedError("bufferization: only splat dense tensor constants")
         ty = op.results[0].type
+        if len(set(values)) != 1:
+            self._global_constant(op, new_block)
+            return
         alloc = memref.AllocOp.get(ty.element_type, shape=[_dim(d) for d in ty.shape])
         buf = alloc.memref
         new_block.add_ops([alloc, *_fill_ops(buf, ty, values[0])])
         self.bufs[op.results[0]] = buf
         self.owned.append(buf)
+
+    def _global_constant(self, op: arith.ConstantOp, new_block: Block) -> None:
+        """A weight: its data goes into a module-level `memref.global constant`,
+        read through `memref.get_global`. The buffer is not owned, so it is
+        never written to or deallocated."""
+        mem_ty = _memref_type(op.results[0].type)
+        name = f"__constant_{sum(isinstance(o, memref.GlobalOp) for o in self.module.ops)}"
+        glob = memref.GlobalOp.get(StringAttr(name), mem_ty, op.value, constant=UnitAttr())
+        self.module.body.block.insert_op_before(glob, self.fn)
+        get = memref.GetGlobalOp(name, mem_ty)
+        new_block.add_op(get)
+        self.bufs[op.results[0]] = get.memref
 
     # ---- extract / insert -------------------------------------------------------
     def _extract(self, op: Operation, new_block: Block) -> None:
@@ -186,8 +205,9 @@ class _Bufferizer:
         buf = self._buf(dest)
         if buf not in self.owned:
             raise NotImplementedError(
-                "bufferization: tensor.insert into a function argument would mutate the "
-                "caller's input (needs a copy)"
+                "bufferization: tensor.insert into a buffer not owned by the function "
+                "(a function argument or a weight constant) would modify data it must "
+                "not change (needs a copy)"
             )
         if not dest.has_one_use():
             raise NotImplementedError(
@@ -241,7 +261,19 @@ class _Bufferizer:
 
     # ---- return: hand back buffers, free temporaries -----------------------------
     def _return(self, op: Operation, new_block: Block) -> None:
-        operands = [self._buf(v) if _is_tensor(v) else self.vmap[v] for v in op.operands]
+        operands = []
+        for v in op.operands:
+            if not _is_tensor(v):
+                operands.append(self.vmap[v])
+                continue
+            buf = self._buf(v)
+            if buf not in self.owned:
+                # An argument or a weight: the caller frees whatever is returned, so
+                # hand back a copy it can own instead.
+                copy = memref.AllocOp.get(buf.type.element_type, shape=buf.type.get_shape())
+                new_block.add_ops([copy, memref.CopyOp(buf, copy.memref)])
+                buf = copy.memref
+            operands.append(buf)
         # Ownership of a returned buffer passes to the caller; anything else we
         # allocated is a temporary. Freeing at function exit is always safe (a
         # last-use analysis could free earlier -- the extension point for that).

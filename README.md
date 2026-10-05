@@ -6,7 +6,7 @@ dialects, and compiles it to an executable with LLVM. A pure-Python interpreter 
 IR at every stage and is the test suite's correctness oracle.
 
 **Supported:** ONNX `Add`, `Sub`, `Mul`, `MatMul`, `Relu`, `Pow`, `Max`, `Min`, `Constant`;
-`int32` only; one model output. Rank-0 inputs become scalars, rank-1 vectors, rank-2/3 tensors
+initializers (weights); `int32` only; one model output. Rank-0 inputs become scalars, rank-1 vectors, rank-2/3 tensors
 (rank 3 = one leading batch dim). `Pow`/`Max`/`Min` are scalar-only.
 
 ```

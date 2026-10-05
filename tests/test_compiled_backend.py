@@ -71,7 +71,7 @@ def _compile_and_run(tmp_path, onnx_path, run_args):
     )
     out_o = tmp_path / "out.o"
     subprocess.run(
-        [tool("llc"), "-O2", "-filetype=obj", str(out_ll), "-o", str(out_o)],
+        [tool("llc"), "-O2", "-relocation-model=pic", "-filetype=obj", str(out_ll), "-o", str(out_o)],
         check=True, capture_output=True, text=True,
     )
     run_bin = tmp_path / "run"
@@ -150,6 +150,43 @@ def test_memref_abi_compiles_and_matches_independent_oracle(tmp_path):
     stdout = _compile_and_run(tmp_path, onnx_path, args)
     actual = [_parse_ints(row) for row in stdout.splitlines() if row.strip()]
     assert actual == expected
+
+
+def test_weight_initializer_compiles_and_matches_numpy(tmp_path):
+    """Y = X @ W, with W stored in the model as an ONNX initializer. The weight
+    becomes a `memref.global` in the executable's read-only data, which
+    llc must reference position-independently for clang to link it."""
+    np = pytest.importorskip("numpy")
+    from onnx import TensorProto, helper, save
+
+    x = np.array([[1, 2], [3, 4]])
+    w = np.array([[1, 2, 3], [4, 5, 6]])
+    graph = helper.make_graph(
+        [helper.make_node("MatMul", ["x", "w"], ["y"])],
+        "weighted_matmul",
+        [helper.make_tensor_value_info("x", TensorProto.INT32, [2, 2])],
+        [helper.make_tensor_value_info("y", TensorProto.INT32, [2, 3])],
+        initializer=[helper.make_tensor("w", TensorProto.INT32, [2, 3], w.flatten().tolist())],
+    )
+    onnx_path = tmp_path / "weighted_matmul.onnx"
+    save(helper.make_model(graph), str(onnx_path))
+
+    stdout = _compile_and_run(tmp_path, onnx_path, x.flatten().tolist())
+    actual = [_parse_ints(row) for row in stdout.splitlines() if row.strip()]
+    assert actual == (x @ w).tolist()
+
+
+def test_model_returning_its_input_frees_each_buffer_once(tmp_path):
+    """The graph's output is its input. The harness frees both the result and
+    its own input buffer, so the result must be a separate copy."""
+    from onnx import TensorProto, helper, save
+
+    x = helper.make_tensor_value_info("x", TensorProto.INT32, [2, 2])
+    onnx_path = tmp_path / "identity.onnx"
+    save(helper.make_model(helper.make_graph([], "identity", [x], [x])), str(onnx_path))
+
+    stdout = _compile_and_run(tmp_path, onnx_path, [1, 2, 3, 4])
+    assert [_parse_ints(row) for row in stdout.splitlines()] == [[1, 2], [3, 4]]
 
 
 def test_real_scripts_compile_and_run_end_to_end_matches_numpy():
