@@ -1,12 +1,16 @@
 """Imports an ONNX graph as an `hc` module with one `func.func`.
 
-Types come from ONNX shapes, with every element type imported as i32: rank 0
--> i32, rank 2 or 3 -> TensorType, any other rank -> VectorType. Graph inputs
-use their declared shape (`_type_from_value_info`); initializers and
-`Constant` nodes use the same rule (`_const_op_from_tensor`), so a constant
-and a runtime input of the same shape get the same type. Each node picks its
-hc op variant (scalar, `*_vec`, `*_tensor`) from the types of the operands it
-receives.
+Types come from ONNX shapes: rank 0 -> i32, rank 1 -> VectorType, rank 2 or
+3 -> TensorType. Graph inputs use their declared shape
+(`_type_from_value_info`); initializers and `Constant` nodes use the same rule
+(`_const_op_from_tensor`), so a constant and a runtime input of the same shape
+get the same type. A value that isn't INT32, has rank 4 or more, or has a dim
+without a known positive size is rejected (`_check_value`).
+
+Each node picks its hc op variant (scalar, `*_vec`, `*_tensor`) from the types
+of the operands it receives, and the op is verified as it is built, so
+operands that don't fit (for example a bias add that needs broadcasting) are
+rejected with the node's name.
 """
 import onnx
 from xdsl.dialects import func, arith, builtin
@@ -14,6 +18,7 @@ from xdsl.dialects import func, arith, builtin
 from xdsl.context import Context
 from xdsl.dialects.builtin import ModuleOp, i32
 from xdsl.ir import Region, Block
+from xdsl.utils.exceptions import VerifyException
 
 from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
 from hc_dialect import HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec
@@ -33,9 +38,30 @@ def _vec_type_from_shape(shape) -> builtin.VectorType:
         return builtin.VectorType(i32, dims)
 
 
+def _check_value(name: str, elem_type: int, dims: list) -> None:
+    """Raises NotImplementedError unless the ONNX value `name` is INT32 with
+    rank 0-3 and every dim a known positive size."""
+    if elem_type != onnx.TensorProto.INT32:
+        raise NotImplementedError(
+            f"ONNX value {name!r}: element type "
+            f"{onnx.TensorProto.DataType.Name(elem_type)}, only INT32 is supported"
+        )
+    if len(dims) > 3:
+        raise NotImplementedError(
+            f"ONNX value {name!r}: rank {len(dims)}, only ranks 0-3 are supported"
+        )
+    if any(not isinstance(d, int) or d <= 0 for d in dims):
+        raise NotImplementedError(
+            f"ONNX value {name!r}: shape {dims}, every dim must be a known positive size"
+        )
+
+
 def _type_from_value_info(value_info):
     """Returns the hc type for an ONNX graph input's declared shape."""
-    dims = [d.dim_value for d in value_info.type.tensor_type.shape.dim]
+    tensor_type = value_info.type.tensor_type
+    dims = [d.dim_value if d.HasField("dim_value") else (d.dim_param or "?")
+            for d in tensor_type.shape.dim]
+    _check_value(value_info.name, tensor_type.elem_type, dims)
     if not dims:
         return i32
     if len(dims) in (2, 3):
@@ -43,9 +69,10 @@ def _type_from_value_info(value_info):
     return _vec_type_from_shape(dims)
 
 
-def _const_op_from_tensor(tensor_proto) -> arith.ConstantOp:
+def _const_op_from_tensor(tensor_proto, name: str) -> arith.ConstantOp:
     """Builds an `arith.constant` (scalar i32, or dense tensor/vector) from an
-    ONNX TensorProto."""
+    ONNX TensorProto bound to the value `name`."""
+    _check_value(name, tensor_proto.data_type, list(tensor_proto.dims))
     arr = onnx.numpy_helper.to_array(tensor_proto)
     if arr.shape == ():
         return arith.ConstantOp.from_int_and_width(int(arr), 32)
@@ -79,8 +106,9 @@ def import_onnx_to_hc_module(
     """Loads `onnx_path` and returns a module holding `func.func @fn_name`,
     with one block argument per graph input and a single result.
 
-    Raises NotImplementedError for an unsupported op_type or a vector operand
-    to Pow/Max/Min, ValueError for a model without exactly one output or a
+    Raises NotImplementedError for an unsupported op_type, element type, rank
+    or dim, a vector operand to Pow/Max/Min, or operand types the node's hc
+    op rejects; ValueError for a model without exactly one output or a
     `Constant` node without a `value` attribute, and KeyError when a node
     reads a value that is not yet defined.
     """
@@ -100,7 +128,7 @@ def import_onnx_to_hc_module(
 
     # 1) Initializers (weights/constants stored in graph.initializer)
     for init in graph.initializer:
-        c = _const_op_from_tensor(init)
+        c = _const_op_from_tensor(init, init.name)
         ops.append(c)
         env[init.name] = c.result
 
@@ -113,7 +141,7 @@ def import_onnx_to_hc_module(
                 value_attr = a.t
         if value_attr is None:
             raise ValueError("Constant node without 'value' attribute")
-        c = _const_op_from_tensor(value_attr)
+        c = _const_op_from_tensor(value_attr, node.output[0])
         ops.append(c)
         env[node.output[0]] = c.result
 
@@ -128,6 +156,21 @@ def import_onnx_to_hc_module(
                 raise KeyError(f"ONNX value not found yet: {name} (node {node.op_type})")
             return env[name]
 
+        def emit(hc_op):
+            """Verifies `hc_op`, naming this node if its operands don't fit,
+            then binds its result to the node's output."""
+            try:
+                hc_op.verify()
+            except VerifyException as e:
+                types = ", ".join(str(v.type) for v in hc_op.operands)
+                raise NotImplementedError(
+                    f"ONNX {node.op_type} node {node.name or node.output[0]!r}: "
+                    f"{hc_op.name} rejects operand types ({types}); "
+                    f"broadcasting is not supported"
+                ) from e
+            ops.append(hc_op)
+            env[node.output[0]] = hc_op.results[0]
+
         if node.op_type == "Add":
             a = get(node.input[0])
             b = get(node.input[1])
@@ -138,8 +181,7 @@ def import_onnx_to_hc_module(
             else:
                 hc_cls = HCAdd
             hc = hc_cls(operands=[a, b], result_types=[a.type])
-            ops.append(hc)
-            env[node.output[0]] = hc.results[0]
+            emit(hc)
             continue
 
         if node.op_type == "Sub":
@@ -152,8 +194,7 @@ def import_onnx_to_hc_module(
             else:
                 hc_cls = HCSub
             hc = hc_cls(operands=[a, b], result_types=[a.type])
-            ops.append(hc)
-            env[node.output[0]] = hc.results[0]
+            emit(hc)
             continue
 
         if node.op_type == "Mul":
@@ -169,8 +210,7 @@ def import_onnx_to_hc_module(
                 hc = HCMulVec(operands=[scalar, vec], result_types=[vec.type])
             else:
                 hc = HCMul(operands=[a, b], result_types=[i32])
-            ops.append(hc)
-            env[node.output[0]] = hc.results[0]
+            emit(hc)
             continue
 
         if node.op_type == "MatMul":
@@ -182,8 +222,7 @@ def import_onnx_to_hc_module(
             n = b_dims[-1]
             res_ty = builtin.TensorType(i32, batch + [m, n])
             hc = HCMatmul(operands=[a, b], result_types=[res_ty])
-            ops.append(hc)
-            env[node.output[0]] = hc.results[0]
+            emit(hc)
             continue
 
         if node.op_type == "Relu":
@@ -195,8 +234,7 @@ def import_onnx_to_hc_module(
             else:
                 hc_cls = HCRelu
             hc = hc_cls(operands=[x], result_types=[x.type])
-            ops.append(hc)
-            env[node.output[0]] = hc.results[0]
+            emit(hc)
             continue
 
         if node.op_type == "Pow":
@@ -205,8 +243,7 @@ def import_onnx_to_hc_module(
             if _is_vec(a) or _is_vec(b):
                 raise NotImplementedError("hc.pow has no vector variant yet")
             hc_pow = HCPow(operands=[a, b], result_types=[i32])
-            ops.append(hc_pow)
-            env[node.output[0]] = hc_pow.results[0]
+            emit(hc_pow)
             continue
 
         if node.op_type == "Max":
@@ -215,8 +252,7 @@ def import_onnx_to_hc_module(
             if _is_vec(a) or _is_vec(b):
                 raise NotImplementedError("hc.max has no vector variant yet")
             hc_max = HCMax(operands=[a, b], result_types=[i32])
-            ops.append(hc_max)
-            env[node.output[0]] = hc_max.results[0]
+            emit(hc_max)
             continue
 
         if node.op_type == "Min":
@@ -225,8 +261,7 @@ def import_onnx_to_hc_module(
             if _is_vec(a) or _is_vec(b):
                 raise NotImplementedError("hc.min has no vector variant yet")
             hc_min = HCMin(operands=[a, b], result_types=[i32])
-            ops.append(hc_min)
-            env[node.output[0]] = hc_min.results[0]
+            emit(hc_min)
             continue
 
         raise NotImplementedError(f"Unsupported ONNX op: {node.op_type}")

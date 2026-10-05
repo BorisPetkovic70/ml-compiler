@@ -230,10 +230,12 @@ The suite has three layers:
 
 Each limit below exists because no current workload needs it, not by accident.
 
-- **`i32` only.** The loader maps every ONNX element type to `i32`. The scalar `hc.relu`/`hc.pow`
-  lowerings hardcode `i32` constants.
-- **Shapes:** rank 0 (scalar), 1 (vector), 2–3 (tensor, one batch dim). A rank-4+ ONNX input
-  becomes a multi-dimensional vector instead of raising an error.
+- **`i32` only.** The loader rejects any ONNX element type other than `INT32`. The scalar
+  `hc.relu`/`hc.pow` lowerings hardcode `i32` constants.
+- **Shapes:** rank 0 (scalar), 1 (vector), 2–3 (tensor, one batch dim), with every dim a known
+  positive size. The loader rejects anything else (rank 4+, symbolic dims).
+- **No broadcasting.** Operands must have matching types (bias add `[M,N] + [N]` and
+  tensor × scalar are rejected), apart from `hc.mul_vec`'s scalar × vector.
 - **One function, one block, one output.** The loader, bufferization and interpreter all
   assume this.
 - **No overflow model.** Python ints don't wrap the way `i32` does in hardware.

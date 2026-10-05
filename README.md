@@ -7,7 +7,8 @@ IR at every stage and is the test suite's correctness oracle.
 
 **Supported:** ONNX `Add`, `Sub`, `Mul`, `MatMul`, `Relu`, `Pow`, `Max`, `Min`, `Constant`;
 initializers (weights); `int32` only; one model output. Rank-0 inputs become scalars, rank-1 vectors, rank-2/3 tensors
-(rank 3 = one leading batch dim). `Pow`/`Max`/`Min` are scalar-only.
+(rank 3 = one leading batch dim). `Pow`/`Max`/`Min` are scalar-only. The loader rejects other
+element types, rank 4+, symbolic dims, and operands that would need broadcasting.
 
 ```
 ONNX ─▶ front_end/loader.py ─▶ hc.* ─▶ middle_end/pipeline.py ─▶ back_end/harness_gen.py ─▶ back_end/back_end.sh
