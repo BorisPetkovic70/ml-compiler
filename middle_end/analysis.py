@@ -1,11 +1,51 @@
-"""Debug reports: prints a use-def listing and block-local liveness sets for
-each function's top-level blocks. Read-only; runs only when
-`MiddleEndPipelineConfig.run_analysis` is set, and no pass consumes its
-output."""
+"""Read-only analyses.
+
+- `is_last_use` answers whether a value is dead once an op has run, across
+  nested `scf` regions. Bufferization uses it to decide whether a write may
+  happen in place.
+- The debug reports print a use-def listing and block-local liveness sets for
+  each function's top-level blocks. They run only when
+  `MiddleEndPipelineConfig.run_analysis` is set, and no pass consumes their
+  output."""
 from typing import Any, Iterable
-from xdsl.dialects import func
+from xdsl.dialects import func, scf
 from xdsl.dialects.builtin import ModuleOp
 from xdsl.ir import Block, Operation, SSAValue
+
+# -----------------------------------------------------------------------------
+# Last-use query (region-aware)
+# -----------------------------------------------------------------------------
+def _count_uses(op: Operation, value: SSAValue) -> int:
+    """How many times `op`, or any op nested inside it, uses `value`."""
+    return sum(o is value for nested in op.walk() for o in nested.operands)
+
+
+def is_last_use(value: SSAValue, op: Operation) -> bool:
+    """True if `op` uses `value` exactly once and nothing can read `value`
+    after `op` has run.
+
+    Walks outwards from `op` to the block that defines `value`. `value` is
+    still needed if:
+    - `op` uses it a second time, directly or inside its own regions;
+    - an op later in any block on the way out uses it, directly or nested;
+    - the walk leaves an `scf.for` body, because the next iteration runs
+      `op` again and expects `value` unchanged.
+    """
+    if _count_uses(op, value) != 1:
+        return False
+    def_block = value.owner if isinstance(value.owner, Block) else value.owner.parent
+    node = op
+    while True:
+        later = node.next_op
+        while later is not None:
+            if _count_uses(later, value):
+                return False
+            later = later.next_op
+        if node.parent is def_block:
+            return True
+        node = node.parent_op()
+        if isinstance(node, scf.ForOp):
+            return False
 
 # -----------------------------------------------------------------------------
 # Analysis 1: Use-def report

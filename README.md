@@ -101,7 +101,7 @@ hc_main.py              driver: ONNX → hc → middle end → .mlir + harness, 
 full_compiler.sh        hc_main.py + back_end/back_end.sh
 front_end/              loader.py (ONNX → hc), build_model.py (sample models)
 middle_end/             pipeline.py, hc_lowering.py, bufferization.py, constant_folding.py,
-                        dead_code_elimination.py, analysis.py (unused)
+                        dead_code_elimination.py, analysis.py
 back_end/               harness_gen.py, back_end.sh
 simulator/              interpreter.py
 tests/                  pytest suite

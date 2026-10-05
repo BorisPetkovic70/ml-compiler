@@ -18,13 +18,16 @@ a copy.
 
 Each function body is rebuilt into a fresh block rather than edited in place,
 because `scf.for` can't change its iter_arg count in place. Reading from the
-untouched old block also keeps use counts accurate for the single-use checks.
+untouched old block also keeps its use lists intact for the `is_last_use`
+checks.
 """
 from xdsl.dialects import arith, func, memref, scf
 from xdsl.dialects.builtin import (
     FunctionType, IndexType, MemRefType, ModuleOp, StringAttr, TensorType, UnitAttr,
 )
 from xdsl.ir import Block, Operation, Region, SSAValue
+
+from .analysis import is_last_use
 
 
 def apply_bufferization(module: ModuleOp) -> None:
@@ -209,10 +212,11 @@ class _Bufferizer:
                 "(a function argument or a weight constant) would modify data it must "
                 "not change (needs a copy)"
             )
-        if not dest.has_one_use():
+        if not is_last_use(dest, op):
             raise NotImplementedError(
-                "bufferization: the tensor being inserted into is used again elsewhere, so "
-                "an in-place store would change what that other use sees (needs a copy)"
+                "bufferization: the tensor being inserted into is still needed afterwards "
+                "(by a later use or the next loop iteration), so an in-place store would "
+                "change what that use sees (needs a copy)"
             )
         indices = [self.vmap[i] for i in op.indices]
         new_block.add_op(memref.StoreOp.get(self.vmap[op.scalar], buf, indices))
@@ -231,10 +235,12 @@ class _Bufferizer:
             self.vmap[carried_old[i]] = new_body.args[1 + j]
         for i in dropped:
             init = op.iter_args[i]
-            if not init.has_one_use():
+            if not is_last_use(init, op):
                 raise NotImplementedError(
-                    "bufferization: a tensor carried by scf.for is used again elsewhere "
-                    "(needs a copy)"
+                    "bufferization: a tensor carried by scf.for is still needed afterwards "
+                    "(by a later use, the loop's own body, or the next iteration of an "
+                    "enclosing loop), so the loop's in-place stores would change what that "
+                    "use sees (needs a copy)"
                 )
             self.bufs[carried_old[i]] = self._buf(init)
 

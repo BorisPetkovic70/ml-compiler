@@ -128,3 +128,18 @@ def test_matmul_then_relu_matches_numpy():
       %r = "hc.relu_tensor"(%m) : (tensor<2x4xi32>) -> tensor<2x4xi32>
       func.return %r : tensor<2x4xi32>
     }""", [a.tolist(), b.tolist()], np.maximum(a @ b, 0).tolist())
+
+
+def test_read_before_write_in_place():
+    """`%t` is read, then written. Bufferization stores into the same
+    buffer, and the result is unchanged."""
+    check_oracle("""
+    func.func @f(%d: i32) -> i32 {
+      %c0 = arith.constant 0 : index
+      %t = arith.constant dense<5> : tensor<2x2xi32>
+      %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
+      %inc = arith.addi %old, %d : i32
+      %t2 = tensor.insert %inc into %t[%c0, %c0] : tensor<2x2xi32>
+      %x = tensor.extract %t2[%c0, %c0] : tensor<2x2xi32>
+      func.return %x : i32
+    }""", [3], 8)

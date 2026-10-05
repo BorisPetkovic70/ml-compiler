@@ -137,8 +137,11 @@ deallocated.
 
 **It refuses (`NotImplementedError`) instead of guessing when:**
 
-- the tensor being inserted into, or a loop's tensor `iter_arg` init, has more than one use (an
-  in-place write would be visible to that other use);
+- the tensor being inserted into, or a loop's tensor `iter_arg` init, is still needed after the
+  write (an in-place write would be visible to that later use). `analysis.is_last_use` decides
+  this: the value must not be used by a later op, by the loop's own body (for an init), or
+  from inside an `scf.for` body that doesn't define it, where the next iteration needs it
+  unchanged. A read *before* the write is fine;
 - an insert targets a buffer the function doesn't own: an argument (it would modify the
   caller's input) or a weight (it would write to read-only data);
 - a loop yields a different buffer than the one it carries;
@@ -246,4 +249,6 @@ Each limit below exists because no current workload needs it, not by accident.
 - **Harness:** no vector and memref arguments in the same signature. Large vectors still use the
   register ABI rather than being routed through the memref convention.
 - **DCE** only scans the function's top-level block, not loop or `if` bodies.
-- **`analysis.py`** (use-def and liveness printing) is wired to a config flag, but no pass uses it.
+- **`analysis.py`**: bufferization uses `is_last_use`. The use-def and liveness printing is
+  wired to a config flag, but no pass uses it, and its liveness is block-local (it doesn't see
+  uses inside nested regions).

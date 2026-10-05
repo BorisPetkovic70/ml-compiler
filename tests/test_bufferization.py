@@ -191,10 +191,35 @@ def test_function_without_tensors_is_left_untouched():
     assert str(module) == before
 
 
-def test_refuses_insert_into_a_tensor_with_a_second_use():
+def test_read_before_write_stores_in_place():
+    """`%t` has two uses, but the extract runs before the insert and nothing
+    reads `%t` afterwards. The insert is its last use, so the store goes
+    into the same buffer."""
+    check_bufferization("""
+    func.func @f() -> i32 {
+      %c0 = arith.constant 0 : index
+      %one = arith.constant 1 : i32
+      %t = arith.constant dense<5> : tensor<2x2xi32>
+      %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
+      %inc = arith.addi %old, %one : i32
+      %t2 = tensor.insert %inc into %t[%c0, %c0] : tensor<2x2xi32>
+      %x = tensor.extract %t2[%c0, %c0] : tensor<2x2xi32>
+      func.return %x : i32
+    }""", """
+    // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK: %[[OLD:.*]] = memref.load %[[BUF]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: %[[INC:.*]] = arith.addi %[[OLD]], %one : i32
+    // CHECK-NEXT: memref.store %[[INC]], %[[BUF]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: %[[X:.*]] = memref.load %[[BUF]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: memref.dealloc %[[BUF]] : memref<2x2xi32>
+    // CHECK-NEXT: func.return %[[X]] : i32
+    """)
+
+
+def test_refuses_insert_into_a_tensor_read_afterwards():
     """`%old` must still read 0 after the insert. A store into `%t`'s buffer
     would make it read 9, so the pass refuses instead of miscompiling."""
-    with pytest.raises(NotImplementedError, match="used again elsewhere"):
+    with pytest.raises(NotImplementedError, match="still needed afterwards"):
         bufferize("""
         func.func @f() -> i32 {
           %c0 = arith.constant 0 : index
@@ -203,6 +228,29 @@ def test_refuses_insert_into_a_tensor_with_a_second_use():
           %t2 = tensor.insert %v into %t[%c0, %c0] : tensor<2x2xi32>
           %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
           func.return %old : i32
+        }""")
+
+
+def test_refuses_insert_in_a_loop_into_a_tensor_defined_outside_it():
+    """The insert is `%t`'s only use, but it runs once per iteration, and
+    each iteration must start from the original `%t`. A store would keep the
+    previous iteration's write in the buffer."""
+    with pytest.raises(NotImplementedError, match="next loop iteration"):
+        bufferize("""
+        func.func @f() -> i32 {
+          %c0 = arith.constant 0 : index
+          %c1 = arith.constant 1 : index
+          %c2 = arith.constant 2 : index
+          %v = arith.constant 9 : i32
+          %z = arith.constant 0 : i32
+          %t = arith.constant dense<0> : tensor<2x2xi32>
+          %r = scf.for %i = %c0 to %c2 step %c1 iter_args(%acc = %z) -> (i32) {
+            %t2 = tensor.insert %v into %t[%i, %c0] : tensor<2x2xi32>
+            %x = tensor.extract %t2[%c0, %c0] : tensor<2x2xi32>
+            %s = arith.addi %acc, %x : i32
+            scf.yield %s : i32
+          }
+          func.return %r : i32
         }""")
 
 
