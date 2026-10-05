@@ -35,6 +35,21 @@ def test_scalar_chain():
     """)
 
 
+def test_index_keeps_its_type():
+    """The folded constant takes the op's result type, so `index` arithmetic
+    (loop bounds, offsets) folds to an `index` constant, not an `i32`."""
+    filecheck(fold("""
+    func.func @f() -> index {
+      %a = arith.constant 2 : index
+      %b = arith.constant 3 : index
+      %r = arith.addi %a, %b : index
+      func.return %r : index
+    }"""), """
+    // CHECK: %r = arith.constant 5 : index
+    // CHECK-NEXT: func.return %r : index
+    """)
+
+
 def test_vector_chain():
     """relu((a + b) * -1) folds lane by lane. Every product is negative, so
     the relu (`arith.maxsi` with 0) gives all zeros."""

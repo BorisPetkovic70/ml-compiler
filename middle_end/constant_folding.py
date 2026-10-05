@@ -141,24 +141,6 @@ def _value_from_constant_op(op: Operation | None):
     return None
 
 
-def _result_width(ty, default: int = 32) -> int:
-    # Try to read integer width from a scalar integer type
-    w = getattr(ty, "width", None)
-    if w is None:
-        return default
-
-    # IntegerType.width is an IntAttr, not a Python int
-    for attr_name in ("data", "value"):
-        if hasattr(w, attr_name):
-            return int(getattr(w, attr_name))
-
-    # fallback: try direct int conversion if supported
-    try:
-        return int(w)
-    except Exception:
-        return default
-
-
 def _vec_len(vec_type: builtin.VectorType) -> int:
     n = 1
     for d in vec_type.shape:
@@ -167,8 +149,8 @@ def _vec_len(vec_type: builtin.VectorType) -> int:
 
 
 def _make_const(value, ty) -> arith.ConstantOp:
-    """Build an arith.constant matching `ty`: dense vector, or scalar int."""
+    """Build an arith.constant of type `ty`: dense vector, or scalar int/index."""
     if isinstance(ty, builtin.VectorType):
         dense = builtin.DenseIntOrFPElementsAttr.from_list(ty, value)
         return arith.ConstantOp(dense)
-    return arith.ConstantOp.from_int_and_width(value, _result_width(ty))
+    return arith.ConstantOp(builtin.IntegerAttr(value, ty))
