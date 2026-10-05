@@ -7,14 +7,17 @@ ownership rules, and full refusal list are in docs/DESIGN.md Section 4.
 - other tensor constants (weights) become a read-only `memref.global`;
 - extract/insert become load/store;
 - tensor `iter_args` are dropped;
+- a write goes into the tensor's own buffer when the function owns it and
+  the tensor is dead afterwards (`analysis.is_last_use`); otherwise the
+  buffer is first copied and the write goes into the copy;
 - a returned buffer the function doesn't own (an argument or a weight) is
   copied, so the caller always owns what it gets back;
 - every allocated buffer that isn't returned is deallocated before
   `func.return`.
 
-When an in-place store can't be proven safe, or the IR isn't one of the
-shapes it handles, the pass raises NotImplementedError rather than inserting
-a copy.
+Copies are placed in the function's top-level block only. When a write
+inside a loop body would need one, or the IR isn't one of the shapes the
+pass handles, it raises NotImplementedError.
 
 Each function body is rebuilt into a fresh block rather than edited in place,
 because `scf.for` can't change its iter_arg count in place. Reading from the
@@ -169,6 +172,29 @@ class _Bufferizer:
         # mapped to a buffer.
         return self.bufs[value]
 
+    def _copy(self, buf: SSAValue, new_block: Block) -> SSAValue:
+        """Emits an owned buffer holding a copy of `buf`, and returns it."""
+        alloc = memref.AllocOp.get(buf.type.element_type, shape=buf.type.get_shape())
+        new_block.add_ops([alloc, memref.CopyOp(buf, alloc.memref)])
+        self.owned.append(alloc.memref)
+        return alloc.memref
+
+    def _writable(self, value: SSAValue, op: Operation, new_block: Block) -> SSAValue:
+        """The buffer `op` may overwrite to produce a new version of the
+        tensor `value`: `value`'s own buffer when the function owns it and
+        `op` is `value`'s last use, otherwise a copy of it."""
+        buf = self._buf(value)
+        if buf in self.owned and is_last_use(value, op):
+            return buf
+        if new_block is not self.entry:
+            raise NotImplementedError(
+                "bufferization: a write inside a nested region needs a copy of its tensor "
+                "(a function argument or weight, or a tensor still needed by a later use "
+                "or the next loop iteration); copies are placed in the function's "
+                "top-level block only"
+            )
+        return self._copy(buf, new_block)
+
     # ---- tensor constant -> alloc + fill, or a read-only global -----------------
     def _tensor_constant(self, op: arith.ConstantOp, new_block: Block) -> None:
         if new_block is not self.entry:
@@ -204,20 +230,7 @@ class _Bufferizer:
         self.vmap[op.results[0]] = load.results[0]
 
     def _insert(self, op: Operation, new_block: Block) -> None:
-        dest = op.dest
-        buf = self._buf(dest)
-        if buf not in self.owned:
-            raise NotImplementedError(
-                "bufferization: tensor.insert into a buffer not owned by the function "
-                "(a function argument or a weight constant) would modify data it must "
-                "not change (needs a copy)"
-            )
-        if not is_last_use(dest, op):
-            raise NotImplementedError(
-                "bufferization: the tensor being inserted into is still needed afterwards "
-                "(by a later use or the next loop iteration), so an in-place store would "
-                "change what that use sees (needs a copy)"
-            )
+        buf = self._writable(op.dest, op, new_block)
         indices = [self.vmap[i] for i in op.indices]
         new_block.add_op(memref.StoreOp.get(self.vmap[op.scalar], buf, indices))
         self.bufs[op.results[0]] = buf          # same buffer, new "version"
@@ -234,15 +247,7 @@ class _Bufferizer:
         for j, i in enumerate(kept):
             self.vmap[carried_old[i]] = new_body.args[1 + j]
         for i in dropped:
-            init = op.iter_args[i]
-            if not is_last_use(init, op):
-                raise NotImplementedError(
-                    "bufferization: a tensor carried by scf.for is still needed afterwards "
-                    "(by a later use, the loop's own body, or the next iteration of an "
-                    "enclosing loop), so the loop's in-place stores would change what that "
-                    "use sees (needs a copy)"
-                )
-            self.bufs[carried_old[i]] = self._buf(init)
+            self.bufs[carried_old[i]] = self._writable(op.iter_args[i], op, new_block)
 
         *body_ops, terminator = list(old_body.ops)
         self._translate(body_ops, new_body)
@@ -276,9 +281,7 @@ class _Bufferizer:
             if buf not in self.owned:
                 # An argument or a weight: the caller frees whatever is returned, so
                 # hand back a copy it can own instead.
-                copy = memref.AllocOp.get(buf.type.element_type, shape=buf.type.get_shape())
-                new_block.add_ops([copy, memref.CopyOp(buf, copy.memref)])
-                buf = copy.memref
+                buf = self._copy(buf, new_block)
             operands.append(buf)
         # Ownership of a returned buffer passes to the caller; anything else we
         # allocated is a temporary. Freeing at function exit is always safe (a

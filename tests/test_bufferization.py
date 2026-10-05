@@ -133,21 +133,6 @@ def test_weight_constant_becomes_a_read_only_global():
     """)
 
 
-def test_refuses_insert_into_a_weight_constant():
-    """A store into the global would write to the executable's read-only
-    data, so the pass refuses, as it does for a function argument."""
-    with pytest.raises(NotImplementedError, match="not owned"):
-        bufferize("""
-        func.func @f() -> i32 {
-          %c0 = arith.constant 0 : index
-          %v = arith.constant 9 : i32
-          %w = arith.constant dense<[[1, 2], [3, 4]]> : tensor<2x2xi32>
-          %w2 = tensor.insert %v into %w[%c0, %c0] : tensor<2x2xi32>
-          %x = tensor.extract %w2[%c0, %c0] : tensor<2x2xi32>
-          func.return %x : i32
-        }""")
-
-
 def test_returned_argument_is_copied():
     """The caller frees the returned buffer, and it also frees its own input.
     Returning the input buffer itself would free it twice, so the pass
@@ -216,26 +201,36 @@ def test_read_before_write_stores_in_place():
     """)
 
 
-def test_refuses_insert_into_a_tensor_read_afterwards():
+def test_insert_into_a_tensor_read_afterwards_writes_to_a_copy():
     """`%old` must still read 0 after the insert. A store into `%t`'s buffer
-    would make it read 9, so the pass refuses instead of miscompiling."""
-    with pytest.raises(NotImplementedError, match="still needed afterwards"):
-        bufferize("""
-        func.func @f() -> i32 {
-          %c0 = arith.constant 0 : index
-          %v = arith.constant 9 : i32
-          %t = arith.constant dense<0> : tensor<2x2xi32>
-          %t2 = tensor.insert %v into %t[%c0, %c0] : tensor<2x2xi32>
-          %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
-          func.return %old : i32
-        }""")
+    would make it read 9, so the store goes into a copy and `%old` loads
+    from the original. Both buffers are temporaries."""
+    check_bufferization("""
+    func.func @f() -> i32 {
+      %c0 = arith.constant 0 : index
+      %v = arith.constant 9 : i32
+      %t = arith.constant dense<0> : tensor<2x2xi32>
+      %t2 = tensor.insert %v into %t[%c0, %c0] : tensor<2x2xi32>
+      %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
+      func.return %old : i32
+    }""", """
+    // CHECK: %[[T:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: "memref.copy"(%[[T]], %[[COPY]]) : (memref<2x2xi32>, memref<2x2xi32>) -> ()
+    // CHECK-NEXT: memref.store %v, %[[COPY]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: %[[OLD:.*]] = memref.load %[[T]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: memref.dealloc %[[T]] : memref<2x2xi32>
+    // CHECK-NEXT: memref.dealloc %[[COPY]] : memref<2x2xi32>
+    // CHECK-NEXT: func.return %[[OLD]] : i32
+    """)
 
 
 def test_refuses_insert_in_a_loop_into_a_tensor_defined_outside_it():
     """The insert is `%t`'s only use, but it runs once per iteration, and
     each iteration must start from the original `%t`. A store would keep the
-    previous iteration's write in the buffer."""
-    with pytest.raises(NotImplementedError, match="next loop iteration"):
+    previous iteration's write in the buffer. The fix would be a copy per
+    iteration, which this pass does not place inside a loop body."""
+    with pytest.raises(NotImplementedError, match="nested region"):
         bufferize("""
         func.func @f() -> i32 {
           %c0 = arith.constant 0 : index
@@ -254,13 +249,44 @@ def test_refuses_insert_in_a_loop_into_a_tensor_defined_outside_it():
         }""")
 
 
-def test_refuses_insert_into_a_function_argument():
-    """A store into `%arg`'s buffer would change the caller's input."""
-    with pytest.raises(NotImplementedError, match="function argument"):
-        bufferize("""
-        func.func @f(%arg: tensor<2x2xi32>) -> tensor<2x2xi32> {
-          %c0 = arith.constant 0 : index
-          %v = arith.constant 9 : i32
-          %r = tensor.insert %v into %arg[%c0, %c0] : tensor<2x2xi32>
-          func.return %r : tensor<2x2xi32>
-        }""")
+def test_insert_into_a_function_argument_writes_to_a_copy():
+    """A store into `%arg`'s buffer would change the caller's input, so the
+    store goes into a copy. The function owns the copy, so it is returned
+    as it is."""
+    check_bufferization("""
+    func.func @f(%arg: tensor<2x2xi32>) -> tensor<2x2xi32> {
+      %c0 = arith.constant 0 : index
+      %v = arith.constant 9 : i32
+      %r = tensor.insert %v into %arg[%c0, %c0] : tensor<2x2xi32>
+      func.return %r : tensor<2x2xi32>
+    }""", """
+    // CHECK: func.func @f(%[[ARG:.*]]: memref<2x2xi32>) -> memref<2x2xi32>
+    // CHECK: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: "memref.copy"(%[[ARG]], %[[COPY]]) : (memref<2x2xi32>, memref<2x2xi32>) -> ()
+    // CHECK-NEXT: memref.store %v, %[[COPY]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: func.return %[[COPY]] : memref<2x2xi32>
+    """)
+
+
+def test_loop_carrying_a_function_argument_writes_to_a_copy():
+    """The loop's stores would land in `%a`'s buffer, so `%a` is copied once
+    before the loop and the loop writes into the copy."""
+    check_bufferization("""
+    func.func @f(%a: tensor<2x2xi32>) -> tensor<2x2xi32> {
+      %c0 = arith.constant 0 : index
+      %c1 = arith.constant 1 : index
+      %c2 = arith.constant 2 : index
+      %v = arith.constant 9 : i32
+      %r = scf.for %i = %c0 to %c2 step %c1 iter_args(%t = %a) -> (tensor<2x2xi32>) {
+        %t2 = tensor.insert %v into %t[%i, %c0] : tensor<2x2xi32>
+        scf.yield %t2 : tensor<2x2xi32>
+      }
+      func.return %r : tensor<2x2xi32>
+    }""", """
+    // CHECK: func.func @f(%[[A:.*]]: memref<2x2xi32>) -> memref<2x2xi32>
+    // CHECK: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: "memref.copy"(%[[A]], %[[COPY]]) : (memref<2x2xi32>, memref<2x2xi32>) -> ()
+    // CHECK-NEXT: scf.for %[[I:.*]] = %c0 to %c2 step %c1 {
+    // CHECK-NEXT: memref.store %v, %[[COPY]][%[[I]], %c0] : memref<2x2xi32>
+    // CHECK: func.return %[[COPY]] : memref<2x2xi32>
+    """)

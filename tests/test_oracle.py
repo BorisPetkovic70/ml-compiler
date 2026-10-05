@@ -143,3 +143,17 @@ def test_read_before_write_in_place():
       %x = tensor.extract %t2[%c0, %c0] : tensor<2x2xi32>
       func.return %x : i32
     }""", [3], 8)
+
+
+def test_insert_into_an_input_still_read_afterwards():
+    """`%a` is the caller's buffer and is read again after the insert.
+    Bufferization stores into a copy, so `%old` still reads the input."""
+    check_oracle("""
+    func.func @f(%a: tensor<2x2xi32>, %v: i32) -> i32 {
+      %c0 = arith.constant 0 : index
+      %t = tensor.insert %v into %a[%c0, %c0] : tensor<2x2xi32>
+      %old = tensor.extract %a[%c0, %c0] : tensor<2x2xi32>
+      %new = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
+      %d = arith.subi %new, %old : i32
+      func.return %d : i32
+    }""", [[[1, 2], [3, 4]], 9], 8)
