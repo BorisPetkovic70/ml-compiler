@@ -1,7 +1,7 @@
 """Builders for the sample ONNX models (all INT32, opset 13).
 
-Each builder checks the model with `onnx.checker` and saves it to `path`,
-by default `build/<name>.onnx`, creating the directory if needed. Running
+Each builder checks the model with `onnx.checker` and saves it to `path`
+(`_save`), by default `build/<name>.onnx`, creating the directory if needed. Running
 this module writes all five models.
 """
 import os
@@ -18,10 +18,18 @@ CHAINED_TENSOR_MODEL_PATH = os.path.join(BASE_DIR, "chained_tensor_math.onnx")
 BATCHED_MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "batched_matmul.onnx")
 
 
+def _save(model, path: str) -> None:
+    """Checks `model` and saves it to `path`, creating its directory if
+    needed (none for a bare file name)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    onnx.checker.check_model(model)
+    onnx.save(model, path)
+    print(f"Saved ONNX model to: {path}")
+
+
 def build_score_model(path: str = MODEL_PATH):
     """Scalar model: score = relu(min(max(alpha * |x - mu| ** p, lo), hi)),
     with one scalar input `x`. Exercises Sub, Max, Pow, Mul, Min, Relu."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     # ------------------------------------------------------------
     # Parameters
     # ------------------------------------------------------------
@@ -89,23 +97,20 @@ def build_score_model(path: str = MODEL_PATH):
         producer_name="score_builder",
     )
 
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
-    print(f"Saved ONNX model to: {path}")
+    _save(model, path)
 
 
 
 
 def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int = 4):
     """Vector model: y = relu((a * x + b) * w), with vector inputs x, b of
-    shape [n], a scalar input a, and a constant vector w = [7, 2, 3, 5]
-    (so n must be 4)."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    shape [n], a scalar input a, and a constant vector w that repeats
+    [7, 2, 3, 5] to length n."""
 
     # ------------------------------------------------------------
     # Constant initializers
     # ------------------------------------------------------------
-    w_init = helper.make_tensor("w", TensorProto.INT32, [n], [7,2,3,5])
+    w_init = helper.make_tensor("w", TensorProto.INT32, [n], ([7, 2, 3, 5] * n)[:n])
 
     # ------------------------------------------------------------
     # Inputs / Output  (all vector-shaped: [n])
@@ -148,16 +153,13 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
         producer_name="vec_affine_relu_builder",
     )
 
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
-    print(f"Saved ONNX model to: {path}")
+    _save(model, path)
 
 
 
 
 def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
     """Single-node model: C = A @ B, A:(MxK), B:(KxN), C:(MxN)."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
 
     a = helper.make_tensor_value_info("a", TensorProto.INT32, [m, k])
     b = helper.make_tensor_value_info("b", TensorProto.INT32, [k, n])
@@ -180,9 +182,7 @@ def build_matmul_model(path: str = MATMUL_MODEL_PATH, m: int = 4, k: int = 4, n:
         producer_name="matmul_builder",
     )
 
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
-    print(f"Saved ONNX model to: {path}")
+    _save(model, path)
 
 
 
@@ -191,7 +191,6 @@ def build_chained_tensor_model(path: str = CHAINED_TENSOR_MODEL_PATH, m: int = 4
     """Tensor chain: Y = relu((A @ B) + C), A:(MxK), B:(KxN), C and Y:(MxN).
     Its two intermediate tensors become temporary buffers after
     bufferization."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
 
     # ------------------------------------------------------------
     # Inputs / Output (Strictly rank-2 to avoid broadcasting)
@@ -228,9 +227,7 @@ def build_chained_tensor_model(path: str = CHAINED_TENSOR_MODEL_PATH, m: int = 4
         producer_name="chained_tensor_builder",
     )
 
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
-    print(f"Saved ONNX model to: {path}")
+    _save(model, path)
 
 
 def build_batched_matmul_model(
@@ -238,9 +235,7 @@ def build_batched_matmul_model(
 ):
     """Single-node batched model: C = A @ B, A:(BxMxK), B:(BxKxN), C:(BxMxN)."""
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-
-    a = helper.make_tensor_value_info("a", TensorProto.INT32, [batch, m, k])
+    a =helper.make_tensor_value_info("a", TensorProto.INT32, [batch, m, k])
     b = helper.make_tensor_value_info("b", TensorProto.INT32, [batch, k, n])
     c = helper.make_tensor_value_info("c", TensorProto.INT32, [batch, m, n])
 
@@ -261,9 +256,7 @@ def build_batched_matmul_model(
         producer_name="batched_matmul_builder",
     )
 
-    onnx.checker.check_model(model)
-    onnx.save(model, path)
-    print(f"Saved ONNX model to: {path}")
+    _save(model, path)
 
 
 if __name__ == "__main__":

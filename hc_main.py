@@ -145,9 +145,6 @@ def main():
     middle_end_pipeline = MiddleEndPipeline(config)
     middle_end_pipeline.apply_passes(module)
 
-    print("\n=== AFTER LOWERING (arith.*) ===")
-    print(module)
-
     print("Saving lowered module...")
     with open(lowered_file, "w", encoding="utf-8") as f:
         f.write(str(module))

@@ -39,7 +39,6 @@ class MiddleEndPipelineConfig:
 # -----------------------------
 # Pipeline
 # -----------------------------
-@dataclass
 class MiddleEndPipeline:
     def __init__(self, config: MiddleEndPipelineConfig):
         self.config = config
@@ -49,7 +48,7 @@ class MiddleEndPipeline:
         if self.config.apply_lowering:
             # Apply lowering
             _apply_pass(module, LowerHCPattern)
-            self._print_module(module, "=== AFTER LOWERING  (arith.*) ===")
+            self._print_module(module, "=== AFTER LOWERING (arith.*) ===")
 
         if self.config.apply_bufferization:
             # Bufferize any function using tensors (a no-op on scalar/vector-only ones)
