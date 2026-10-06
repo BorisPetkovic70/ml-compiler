@@ -92,7 +92,9 @@ Then add the branch itself, building the replacement operation(s) and calling
 `rewriter.replace(op, new_ops=[...], new_results=[...], safe_erase=True)` (not the deprecated
 `replace_op`). If the lowering is large enough that inlining it would clutter the dispatch
 method (`hc.matmul`'s nest is ~40 lines), factor it into a module-level helper function
-(`_build_matmul_nest`) and call that from the branch.
+(`_build_matmul_nest`) and call that from the branch. An element-wise tensor op needs no loop
+code of its own: pass a `compute(a, b)` function for one element to
+`_build_tensor_elementwise_nest`, which builds one loop per dim with `_build_nest`.
 
 ## 4. Interpreter (`simulator/interpreter.py`)
 

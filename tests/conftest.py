@@ -68,8 +68,8 @@ def vec_ty(n: int, width: int = 32) -> VectorType:
 
 
 def tensor_ty(*dims: int, width: int = 32) -> TensorType:
-    """TensorType<...xi32> from 2 dims (MxN) or 3 dims (a leading batch dim,
-    BxMxN)."""
+    """TensorType<...xi32> with the given dims, e.g. `tensor_ty(2, 3)` for
+    tensor<2x3xi32>."""
     return TensorType(IntegerType(width), list(dims))
 
 

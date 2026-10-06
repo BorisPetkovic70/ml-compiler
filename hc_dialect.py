@@ -4,8 +4,8 @@ Sections 1-2.
 
 `VecInt`/`TensorInt` constrain only the element type. Every rule relating the
 types or shapes of an op's operands and result is enforced by that op's
-`verify_()`, which raises `ValueError`. Tensor ops accept rank 2, or rank 3
-with a leading batch dim.
+`verify_()`, which raises `ValueError`. Element-wise tensor ops accept any
+rank >= 1; `hc.matmul` accepts rank 2, or rank 3 with a leading batch dim.
 
 An op belongs to the dialect only once it is listed in the `HiCompiler` tuple
 at the bottom of this file (checklist: docs/HOW_TO_ADD_AN_OP.md).
@@ -262,14 +262,11 @@ class HCMatmul(IRDLOperation):
 
 
 def _verify_bin_same_tensor_type(op: IRDLOperation):
-    """Requires lhs, rhs, and res to have the identical rank-2 or rank-3
-    tensor type."""
+    """Requires lhs, rhs, and res to have the identical tensor type, of rank
+    >= 1."""
     lhs_t, rhs_t, res_t = op.lhs.type, op.rhs.type, op.res.type
-    if len(lhs_t.shape) not in (2, 3):
-        raise ValueError(
-            f"{op.name}: operands must be rank-2, or rank-3 with a leading batch "
-            f"dim, got {lhs_t}"
-        )
+    if len(lhs_t.shape) < 1:
+        raise ValueError(f"{op.name}: operands must have rank >= 1, got {lhs_t}")
     if lhs_t != rhs_t:
         raise ValueError(
             f"{op.name}: lhs and rhs must have the same tensor type, got {lhs_t} vs {rhs_t}"
@@ -325,11 +322,8 @@ class HCReluTensor(IRDLOperation):
     res = result_def(TensorInt)
 
     def verify_(self):
-        if len(self.x.type.shape) not in (2, 3):
-            raise ValueError(
-                f"hc.relu_tensor: operand must be rank-2, or rank-3 with a "
-                f"leading batch dim, got {self.x.type}"
-            )
+        if len(self.x.type.shape) < 1:
+            raise ValueError(f"hc.relu_tensor: operand must have rank >= 1, got {self.x.type}")
         if self.res.type != self.x.type:
             raise ValueError(
                 f"hc.relu_tensor: result must match operand tensor type, "

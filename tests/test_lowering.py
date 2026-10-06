@@ -118,9 +118,9 @@ def test_relu_vec():
     ("hc.mul_tensor", "arith.muli"),
 ])
 def test_tensor_binop(hc_op, arith_op):
-    """An i/j loop nest threads the result tensor through iter_args and
-    writes C[i, j] = A[i, j] op B[i, j]. The result starts as `tensor.empty`,
-    because the nest writes every element."""
+    """One loop per dim: the i/j nest threads the result tensor through
+    iter_args and writes C[i, j] = A[i, j] op B[i, j]. The result starts as
+    `tensor.empty`, because the nest writes every element."""
     check_lowering(f"""
     func.func @f(%a: tensor<2x3xi32>, %b: tensor<2x3xi32>) -> tensor<2x3xi32> {{
       %r = "{hc_op}"(%a, %b) : (tensor<2x3xi32>, tensor<2x3xi32>) -> tensor<2x3xi32>
@@ -139,6 +139,28 @@ def test_tensor_binop(hc_op, arith_op):
     // CHECK: %[[T:.*]] = tensor.insert %[[Z]] into %[[TJ]][%[[I]], %[[J]]] : tensor<2x3xi32>
     // CHECK: scf.yield %[[T]] : tensor<2x3xi32>
     // CHECK: func.return %[[R]] : tensor<2x3xi32>
+    """)
+
+
+def test_tensor_binop_rank_1():
+    """A rank-1 tensor needs a single loop and a single index."""
+    check_lowering("""
+    func.func @f(%a: tensor<4xi32>, %b: tensor<4xi32>) -> tensor<4xi32> {
+      %r = "hc.add_tensor"(%a, %b) : (tensor<4xi32>, tensor<4xi32>) -> tensor<4xi32>
+      func.return %r : tensor<4xi32>
+    }""", """
+    // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
+    // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
+    // CHECK-DAG: %[[N:.*]] = arith.constant 4 : index
+    // CHECK-DAG: %[[INIT:.*]] = tensor.empty() : tensor<4xi32>
+    // CHECK: %[[R:.*]] = scf.for %[[I:.*]] = %[[C0]] to %[[N]] step %[[C1]] iter_args(%[[T:.*]] = %[[INIT]]) -> (tensor<4xi32>)
+    // CHECK-NOT: scf.for
+    // CHECK: %[[X:.*]] = tensor.extract %a[%[[I]]] : tensor<4xi32>
+    // CHECK: %[[Y:.*]] = tensor.extract %b[%[[I]]] : tensor<4xi32>
+    // CHECK: %[[Z:.*]] = arith.addi %[[X]], %[[Y]] : i32
+    // CHECK: %[[NEXT:.*]] = tensor.insert %[[Z]] into %[[T]][%[[I]]] : tensor<4xi32>
+    // CHECK: scf.yield %[[NEXT]] : tensor<4xi32>
+    // CHECK: func.return %[[R]] : tensor<4xi32>
     """)
 
 

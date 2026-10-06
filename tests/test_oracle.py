@@ -39,6 +39,8 @@ def tensor_type(shape) -> str:
     ("hc.add_tensor", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[10, 20], [30, 40]], [[11, 22], [33, 44]]),
     ("hc.sub_tensor", "tensor<2x2xi32>", [[10, 20], [30, 40]], [[1, 2], [3, 4]], [[9, 18], [27, 36]]),
     ("hc.mul_tensor", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[2, 3], [4, 5]], [[2, 6], [12, 20]]),
+    # rank 1: a single loop
+    ("hc.add_tensor", "tensor<4xi32>", [1, 2, 3, 4], [10, 20, 30, 40], [11, 22, 33, 44]),
     # batched: the lowering wraps the row/column nest in a loop over the leading dim
     ("hc.add_tensor", "tensor<2x2x2xi32>",
      [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],

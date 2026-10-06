@@ -37,7 +37,7 @@ These are three separate kinds of value, each with its own op family (`hc.add`, 
 |---|---|---|---|
 | scalar | `i32` | general register | one `arith` op (`hc.add` → `arith.addi`) |
 | vector | `vector<Nxi32>` | SIMD register | one `arith` op; `arith` is already element-wise on vectors. `hc.mul_vec` (scalar × vector) adds a `vector.broadcast` |
-| tensor | `tensor<MxNxi32>`, `tensor<BxMxNxi32>` | none | an `scf.for` loop nest |
+| tensor | `tensor<Nxi32>`, `tensor<MxNxi32>`, … | none | an `scf.for` loop nest |
 
 The type constraints (`VecInt`, `TensorInt`) only fix the element type. They do not relate the
 shapes of different operands, so every op with a shape rule (same shape; `MxK · KxN → MxN`; a
@@ -46,9 +46,10 @@ each verifier small.
 
 The tensor ops are the first whose lowering adds structure the source op didn't have:
 
-- elementwise (`add/sub/mul/relu_tensor`): `i, j` loops, a map with no reduction.
-- `hc.matmul`: `i, j, k` loops, where `k` is the reduction.
-- rank 3: one outer batch loop around either nest; its induction variable is prepended to every index.
+- elementwise (`add/sub/mul/relu_tensor`): one loop per dim, for any rank >= 1; a map with no
+  reduction. `_build_nest` builds the loops and the op supplies only the body.
+- `hc.matmul`: `i, j, k` loops, where `k` is the reduction. Rank 3 adds one outer batch loop,
+  whose induction variable is prepended to every index.
 
 `hc.max`/`hc.min` lower to `arith.cmpi` + `scf.if`, not `arith.maxsi`/`minsi`. That follows the
 tutorial in `doc_upload/`, which uses them to introduce structured control flow. The
