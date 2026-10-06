@@ -119,7 +119,8 @@ def test_relu_vec():
 ])
 def test_tensor_binop(hc_op, arith_op):
     """An i/j loop nest threads the result tensor through iter_args and
-    writes C[i, j] = A[i, j] op B[i, j]."""
+    writes C[i, j] = A[i, j] op B[i, j]. The result starts as `tensor.empty`,
+    because the nest writes every element."""
     check_lowering(f"""
     func.func @f(%a: tensor<2x3xi32>, %b: tensor<2x3xi32>) -> tensor<2x3xi32> {{
       %r = "{hc_op}"(%a, %b) : (tensor<2x3xi32>, tensor<2x3xi32>) -> tensor<2x3xi32>
@@ -129,7 +130,7 @@ def test_tensor_binop(hc_op, arith_op):
     // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
     // CHECK-DAG: %[[M:.*]] = arith.constant 2 : index
     // CHECK-DAG: %[[N:.*]] = arith.constant 3 : index
-    // CHECK-DAG: %[[INIT:.*]] = arith.constant dense<0> : tensor<2x3xi32>
+    // CHECK-DAG: %[[INIT:.*]] = tensor.empty() : tensor<2x3xi32>
     // CHECK: %[[R:.*]] = scf.for %[[I:.*]] = %[[C0]] to %[[M]] step %[[C1]] iter_args(%[[TI:.*]] = %[[INIT]]) -> (tensor<2x3xi32>)
     // CHECK: scf.for %[[J:.*]] = %[[C0]] to %[[N]] step %[[C1]] iter_args(%[[TJ:.*]] = %[[TI]]) -> (tensor<2x3xi32>)
     // CHECK: %[[X:.*]] = tensor.extract %a[%[[I]], %[[J]]] : tensor<2x3xi32>
@@ -175,7 +176,7 @@ def test_matmul():
     // CHECK-DAG: %[[M:.*]] = arith.constant 2 : index
     // CHECK-DAG: %[[N:.*]] = arith.constant 4 : index
     // CHECK-DAG: %[[K:.*]] = arith.constant 3 : index
-    // CHECK-DAG: %[[INIT:.*]] = arith.constant dense<0> : tensor<2x4xi32>
+    // CHECK-DAG: %[[INIT:.*]] = tensor.empty() : tensor<2x4xi32>
     // CHECK: %[[R:.*]] = scf.for %[[I:.*]] = %[[C0]] to %[[M]] step %[[C1]] iter_args(%[[TI:.*]] = %[[INIT]]) -> (tensor<2x4xi32>)
     // CHECK: scf.for %[[J:.*]] = %[[C0]] to %[[N]] step %[[C1]] iter_args(%[[TJ:.*]] = %[[TI]]) -> (tensor<2x4xi32>)
     // CHECK: %[[ZERO:.*]] = arith.constant 0 : i32

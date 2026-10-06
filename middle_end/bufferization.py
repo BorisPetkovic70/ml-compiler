@@ -3,6 +3,7 @@ ownership rules, and full refusal list are in docs/DESIGN.md Section 4.
 
 `apply_bufferization` rewrites each tensor-using func.func in place:
 - tensors become memrefs;
+- `tensor.empty` becomes a bare `memref.alloc`;
 - splat tensor constants become `memref.alloc` plus a fill loop nest;
 - other tensor constants (weights) become a read-only `memref.global`;
 - extract/insert become load/store;
@@ -148,6 +149,8 @@ class _Bufferizer:
         for op in ops:
             if op.name == "arith.constant" and _is_tensor(op.results[0]):
                 self._tensor_constant(op, new_block)
+            elif op.name == "tensor.empty":
+                self._empty(op, new_block)
             elif op.name == "tensor.extract":
                 self._extract(op, new_block)
             elif op.name == "tensor.insert":
@@ -209,6 +212,16 @@ class _Bufferizer:
         new_block.add_ops([alloc, *_fill_ops(buf, ty, values[0])])
         self.bufs[op.results[0]] = buf
         self.owned.append(buf)
+
+    def _empty(self, op: Operation, new_block: Block) -> None:
+        """A tensor with unspecified contents: an owned buffer, left unfilled."""
+        if new_block is not self.entry:
+            raise NotImplementedError("bufferization: tensor.empty inside a nested region")
+        ty = op.results[0].type
+        alloc = memref.AllocOp.get(ty.element_type, shape=[_dim(d) for d in ty.shape])
+        new_block.add_op(alloc)
+        self.bufs[op.results[0]] = alloc.memref
+        self.owned.append(alloc.memref)
 
     def _global_constant(self, op: arith.ConstantOp, new_block: Block) -> None:
         """A weight: its data goes into a module-level `memref.global constant`,

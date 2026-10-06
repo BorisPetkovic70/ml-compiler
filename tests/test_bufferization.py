@@ -32,7 +32,7 @@ func.func @matmul(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
   %m = arith.constant 2 : index
   %n = arith.constant 4 : index
   %kd = arith.constant 3 : index
-  %init = arith.constant dense<0> : tensor<2x4xi32>
+  %init = tensor.empty() : tensor<2x4xi32>
   %r = scf.for %i = %c0 to %m step %c1 iter_args(%ti = %init) -> (tensor<2x4xi32>) {
     %rj = scf.for %j = %c0 to %n step %c1 iter_args(%tj = %ti) -> (tensor<2x4xi32>) {
       %zero = arith.constant 0 : i32
@@ -52,20 +52,34 @@ func.func @matmul(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
 }"""
 
 
-def test_matmul_result_becomes_a_zero_filled_buffer():
-    """Tensor arguments and results become memrefs. The `dense<0>` result
-    tensor becomes a `memref.alloc` plus a row-major fill nest. The buffer is
-    returned, so it is not deallocated."""
+def test_matmul_result_becomes_an_unfilled_buffer():
+    """Tensor arguments and results become memrefs. The `tensor.empty` result
+    becomes a bare `memref.alloc`: the matmul nest follows it directly, with
+    no fill loop. The buffer is returned, so it is not deallocated."""
     check_bufferization(MATMUL, """
     // CHECK: func.func @matmul(%{{.*}}: memref<2x3xi32>, %{{.*}}: memref<3x4xi32>) -> memref<2x4xi32>
     // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x4xi32>
+    // CHECK-NEXT: scf.for %{{.*}} = %c0 to %m step %c1 {
+    // CHECK-NOT: memref.dealloc
+    // CHECK: func.return %[[BUF]] : memref<2x4xi32>
+    """)
+
+
+def test_splat_constant_becomes_a_filled_buffer():
+    """A constant whose elements are all equal becomes a `memref.alloc` plus
+    a row-major nest that stores the value into every element."""
+    check_bufferization("""
+    func.func @f() -> tensor<2x4xi32> {
+      %t = arith.constant dense<7> : tensor<2x4xi32>
+      func.return %t : tensor<2x4xi32>
+    }""", """
+    // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x4xi32>
     // CHECK-DAG: %[[ROWS:.*]] = arith.constant 2 : index
     // CHECK-DAG: %[[COLS:.*]] = arith.constant 4 : index
-    // CHECK-DAG: %[[ZERO:.*]] = arith.constant 0 : i32
+    // CHECK-DAG: %[[SEVEN:.*]] = arith.constant 7 : i32
     // CHECK: scf.for %[[FI:.*]] = %{{.*}} to %[[ROWS]] step %{{.*}} {
     // CHECK-NEXT: scf.for %[[FJ:.*]] = %{{.*}} to %[[COLS]] step %{{.*}} {
-    // CHECK-NEXT: memref.store %[[ZERO]], %[[BUF]][%[[FI]], %[[FJ]]] : memref<2x4xi32>
-    // CHECK-NOT: memref.dealloc
+    // CHECK-NEXT: memref.store %[[SEVEN]], %[[BUF]][%[[FI]], %[[FJ]]] : memref<2x4xi32>
     // CHECK: func.return %[[BUF]] : memref<2x4xi32>
     """)
 

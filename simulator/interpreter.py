@@ -267,6 +267,16 @@ class Interpreter:
                 continue
 
             # --- tensor ops (value semantics: insert returns a new tensor) ---
+            if name == "tensor.empty":
+                # Unspecified contents are None, so reading an element that was
+                # never inserted fails on the first arithmetic that touches it.
+                shape = _tensor_shape(op.results[0].type)
+                total = 1
+                for d in shape:
+                    total *= d
+                self._set(op.results[0], _reshape([None] * total, shape))
+                continue
+
             if name == "tensor.extract":
                 t = self._get(op.operands[0])
                 idx = [self._get(i) for i in op.indices]
@@ -287,10 +297,9 @@ class Interpreter:
                 total = 1
                 for d in shape:
                     total *= d
-                # Filled with None, not 0: every cell bufferization allocates is fully
-                # overwritten by a fill loop before any real use, so an unfilled cell
-                # (a bug elsewhere) fails loudly on the first arithmetic that touches
-                # it instead of silently computing with a plausible-looking 0.
+                # Filled with None, not 0: a cell that is read before anything stored
+                # into it fails loudly on the first arithmetic that touches it, instead
+                # of silently computing with a plausible-looking 0.
                 self._set(op.results[0], _reshape([None] * total, shape))
                 continue
 

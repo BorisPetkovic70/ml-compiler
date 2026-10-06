@@ -63,8 +63,8 @@ def _const_zero_like(like_type) -> arith.ConstantOp:
 #  Matmul lowering helper
 # -----------------------------------------------------------------------------
 def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
-    """Builds the loop nest computing `lhs @ rhs` into a zero-initialized
-    tensor of `res_type`, and returns (new_ops, result_value).
+    """Builds the loop nest computing `lhs @ rhs` into a new tensor of
+    `res_type`, and returns (new_ops, result_value).
 
     The i and j loops (and the outer batch loop, for rank 3) carry the result
     tensor in iter_args. The innermost k loop carries a scalar accumulator.
@@ -78,25 +78,20 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
     elem_ty = res_type.element_type
     idx_ty = builtin.IndexType()
 
-    total = 1
-    for d in res_dims:
-        total *= d
-
     # loop-control constants must be index
     c0, c1, c_m, c_n, c_k = (
         arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n, k_dim)
     )
-    # zero-initialised result tensor (full res_type, batch dim included)
-    zero_res = arith.ConstantOp(
-        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * total)
-    )
-    setup_ops = [c0, c1, c_m, c_n, c_k, zero_res]
+    # Result tensor (full res_type, batch dim included). Its contents are
+    # unspecified: the nest writes every element and reads none.
+    empty_res = tensor.EmptyOp([], res_type)
+    setup_ops = [c0, c1, c_m, c_n, c_k, empty_res]
 
     # The batch loop, when present, is the outermost level: it carries the
     # full result tensor through iter_args exactly like the i loop does below,
     # and its induction variable is prepended to every extract/insert index.
     prefix = []
-    i_init = zero_res.result
+    i_init = empty_res.tensor
     batch_body = None
     if batched:
         c_bdim = arith.ConstantOp.from_int_and_width(batch_dim, idx_ty)
@@ -136,7 +131,7 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
     if batched:
         batch_body.add_ops([i_loop, scf.YieldOp(i_loop.results[0])])
         batch_loop = scf.ForOp(
-            c0.result, c_bdim.result, c1.result, [zero_res.result], Region(batch_body)
+            c0.result, c_bdim.result, c1.result, [empty_res.tensor], Region(batch_body)
         )
         return [*setup_ops, batch_loop], batch_loop.results[0]
 
@@ -160,23 +155,18 @@ def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compu
     elem_ty = res_type.element_type
     idx_ty = builtin.IndexType()
 
-    total = 1
-    for d in res_dims:
-        total *= d
-
     c0, c1, c_m, c_n = (
         arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n)
     )
-    zero_res = arith.ConstantOp(
-        builtin.DenseIntOrFPElementsAttr.from_list(res_type, [0] * total)
-    )
-    setup_ops = [c0, c1, c_m, c_n, zero_res]
+    # Its contents are unspecified: the nest writes every element and reads none.
+    empty_res = tensor.EmptyOp([], res_type)
+    setup_ops = [c0, c1, c_m, c_n, empty_res]
 
     # The batch loop, when present, is the outermost level: it carries the
     # full result tensor through iter_args exactly like the i loop does below,
     # and its induction variable is prepended to every extract/insert index.
     prefix = []
-    i_init = zero_res.result
+    i_init = empty_res.tensor
     batch_body = None
     if batched:
         c_bdim = arith.ConstantOp.from_int_and_width(batch_dim, idx_ty)
@@ -211,7 +201,7 @@ def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compu
     if batched:
         batch_body.add_ops([i_loop, scf.YieldOp(i_loop.results[0])])
         batch_loop = scf.ForOp(
-            c0.result, c_bdim.result, c1.result, [zero_res.result], Region(batch_body)
+            c0.result, c_bdim.result, c1.result, [empty_res.tensor], Region(batch_body)
         )
         return [*setup_ops, batch_loop], batch_loop.results[0]
 
