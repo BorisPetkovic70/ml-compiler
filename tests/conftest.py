@@ -92,6 +92,7 @@ def lower(module: ModuleOp) -> ModuleOp:
         apply_lowering=True,
         apply_bufferization=False,
         apply_constant_folding=False,
+        apply_cse=False,
         apply_dce=False,
         run_analysis=False,
         debug_mode=False,

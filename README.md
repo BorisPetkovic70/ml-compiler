@@ -13,8 +13,8 @@ element types, rank 4+, symbolic dims, and operands that would need broadcasting
 ```
 ONNX ─▶ front_end/loader.py ─▶ hc.* ─▶ middle_end/pipeline.py ─▶ back_end/harness_gen.py ─▶ back_end/back_end.sh
                                 │      lowering → bufferization    per-model C harness       mlir-opt → mlir-translate
-                                │      (→ const folding → DCE,                               → llc → clang → build/<stem>_run
-                                │       optional; off in hc_main)
+                                │      → constant CSE                                        → llc → clang → build/<stem>_run
+                                │      (+ const folding, DCE; off in hc_main)
                                 └──▶ simulator/interpreter.py  (runs before and after the middle end; results must match)
 ```
 
@@ -46,7 +46,7 @@ python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
 The suite tests the compiler in two ways:
 
 - **FileCheck pass tests** (`test_lowering.py`, `test_bufferization.py`,
-  `test_constant_folding.py`, `test_dce.py`, `test_harness_gen.py`): a small IR string goes
+  `test_constant_folding.py`, `test_cse.py`, `test_dce.py`, `test_harness_gen.py`): a small IR string goes
   through one pass (or the harness generator), and the printed output, IR or C, is matched
   against `// CHECK:` lines. They show *what* a pass emits.
 - **Oracle tests** (`test_oracle.py`): the interpreter runs an `hc` function before and after
@@ -94,7 +94,7 @@ for the same arguments.
 | File | Produced by | Contents |
 |---|---|---|
 | `build/{stem}_original.mlir` | `hc_main.py` | `hc.*` module from the loader |
-| `build/{stem}_lowered.mlir` | `hc_main.py` | after lowering + bufferization |
+| `build/{stem}_lowered.mlir` | `hc_main.py` | after lowering, bufferization and constant CSE |
 | `back_end/{stem}_harness.c` | `hc_main.py` | C `main` matching the entry signature |
 | `build/{stem}_llvm.mlir` | `back_end.sh` | `llvm` dialect, via `mlir-opt` |
 | `build/{stem}_out.ll` | `back_end.sh` | LLVM IR, via `mlir-translate` |
@@ -111,7 +111,7 @@ full_compiler.sh        hc_main.py + hc_interpret.py + back_end/back_end.sh, the
 run_all_models.sh       full_compiler.sh on every sample model, with fixed inputs
 front_end/              loader.py (ONNX → hc), build_model.py (sample models)
 middle_end/             pipeline.py, hc_lowering.py, bufferization.py, constant_folding.py,
-                        dead_code_elimination.py, analysis.py
+                        cse.py, dead_code_elimination.py, analysis.py
 back_end/               harness_gen.py, back_end.sh
 simulator/              interpreter.py
 tests/                  pytest suite

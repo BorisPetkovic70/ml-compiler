@@ -1,5 +1,5 @@
 """The middle-end pass pipeline:
-lowering -> bufferization -> constant folding -> DCE.
+lowering -> bufferization -> constant folding -> constant CSE -> DCE.
 
 The order is fixed and load-bearing (docs/DESIGN.md Section 5); each pass is
 switched on or off by `MiddleEndPipelineConfig`. `apply_passes` rewrites the
@@ -19,6 +19,7 @@ from xdsl.pattern_rewriter import (
 from .analysis import analyze
 from .bufferization import apply_bufferization
 from .constant_folding import FoldArithInts
+from .cse import apply_constant_cse
 from .dead_code_elimination import apply_dce
 from .hc_lowering import LowerHCPattern
 # -----------------------------
@@ -34,6 +35,7 @@ class MiddleEndPipelineConfig:
     apply_lowering: bool = True
     apply_bufferization: bool = True
     apply_constant_folding: bool = True
+    apply_cse: bool = True
     apply_dce: bool = True
 
 # -----------------------------
@@ -59,6 +61,11 @@ class MiddleEndPipeline:
             # Apply constant folding
             _apply_pass(module, FoldArithInts)
             self._print_module(module, "=== AFTER CONSTANT FOLDING ===")
+
+        if self.config.apply_cse:
+            # Merge identical constants, including the ones folding created
+            apply_constant_cse(module)
+            self._print_module(module, "=== AFTER CONSTANT CSE ===")
 
         if self.config.apply_dce:
             # Apply dead code elimination

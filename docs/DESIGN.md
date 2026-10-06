@@ -69,8 +69,8 @@ This is the central idea of the middle end.
 Lowered `hc.matmul` (value semantics), simplified:
 
 ```mlir
-%zero = arith.constant dense<0> : tensor<4x4xi32>
-%C = scf.for %i = %c0 to %c4 step %c1 iter_args(%Ci = %zero) -> (tensor<4x4xi32>) {
+%empty = tensor.empty() : tensor<4x4xi32>
+%C = scf.for %i = %c0 to %c4 step %c1 iter_args(%Ci = %empty) -> (tensor<4x4xi32>) {
   %Cj = scf.for %j = %c0 to %c4 step %c1 iter_args(%Cij = %Ci) -> (tensor<4x4xi32>) {
     %sum = scf.for %k = %c0 to %c4 step %c1 iter_args(%acc = %c0_i32) -> (i32) {
       %a = tensor.extract %A[%i, %k] : tensor<4x4xi32>
@@ -86,11 +86,13 @@ Lowered `hc.matmul` (value semantics), simplified:
 }
 ```
 
+The result starts as `tensor.empty`: a tensor with a shape but unspecified contents. The nest
+writes every element and reads none, so no initial value is needed.
+
 After bufferization (memory semantics):
 
 ```mlir
 %C = memref.alloc() : memref<4x4xi32>
-scf.for ... { scf.for ... { memref.store %c0_i32, %C[...] } }   // fill with 0
 scf.for %i = %c0 to %c4 step %c1 {
   scf.for %j = %c0 to %c4 step %c1 {
     %sum = scf.for %k ... iter_args(%acc = %c0_i32) -> (i32) { ... memref.load ... }
@@ -123,6 +125,7 @@ rather than edited in place, because an `scf.for`'s number of `iter_args` can't 
 | Before | After |
 |---|---|
 | tensor function argument | memref argument (read-only; not owned) |
+| `tensor.empty` (an op's result) | `memref.alloc`, left unfilled |
 | splat `arith.constant dense<c> : tensor<…>` | `memref.alloc` + a loop nest storing `c` |
 | other tensor constant (a weight) | module-level `memref.global constant` + `memref.get_global` (read-only; not owned) |
 | `tensor.extract %t[idx]` | `memref.load %m[idx]` |
@@ -165,11 +168,14 @@ input, `W` and `B` are weights, and the matmul and add results are temporaries.
 
 ## 5. Pass ordering and verification
 
-`MiddleEndPipeline.apply_passes` runs: **lowering → bufferization → constant folding → DCE**,
+`MiddleEndPipeline.apply_passes` runs: **lowering → bufferization → constant folding → constant CSE → DCE**,
 each switchable via `MiddleEndPipelineConfig`.
 
-- Bufferization needs lowering first: `tensor.*` ops and the zero-initialised result constant
-  only exist after it.
+- Bufferization needs lowering first: the `tensor.*` ops only exist after it.
+- Constant CSE (`middle_end/cse.py`) runs after folding, so it also merges the constants
+  folding creates. Each lowering builds its own loop bounds and zeros; the pass keeps one
+  `arith.constant` per value and type and moves it to the top of the function, where it is
+  visible in every loop body.
 - DCE runs last so it can remove constants that folding or bufferization left unused.
 - `FoldArithInts` folds `addi`/`subi`/`muli`/`maxsi` on scalar/vector constants and a
   `vector.broadcast` of a constant. `apply_dce` repeats until nothing changes, removing

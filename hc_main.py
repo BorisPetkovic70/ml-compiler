@@ -1,8 +1,9 @@
 """Driver: `python hc_main.py [model.onnx]`, run from the repository root.
 
 Loads (or builds) the model, writes `build/<stem>_original.mlir`, runs the
-middle end (lowering + bufferization; folding and DCE disabled), and writes
-`build/<stem>_lowered.mlir` and `back_end/<stem>_harness.c`.
+middle end (lowering, bufferization and constant CSE; folding and DCE
+disabled), and writes `build/<stem>_lowered.mlir` and
+`back_end/<stem>_harness.c`.
 """
 import sys
 from pathlib import Path
@@ -73,7 +74,7 @@ def load_module(model_path: Path) -> ModuleOp:
 
 
 def run_middle_end(module: ModuleOp, debug_mode: bool = False) -> None:
-    """Runs lowering and bufferization on `module`, in place."""
+    """Runs lowering, bufferization and constant CSE on `module`, in place."""
     config = MiddleEndPipelineConfig(
         apply_lowering=True,
         apply_constant_folding=False,
