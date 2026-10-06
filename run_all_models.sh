@@ -33,3 +33,7 @@ run chained_tensor_math.onnx $(seq 1 16) $IDENTITY_4X4 \
 
 # A = 1..32 (two 4x4 batches), B = [identity, 2 * identity]: [A0, 2 * A1]
 run batched_matmul.onnx $(seq 1 32) $IDENTITY_4X4 $DOUBLE_4X4
+
+# X = identity, so the result is relu(W + B) for the model's own weights W and B:
+# [0 0 0 0], [2 0 4 0], [6 1 8 3], [10 5 12 7]
+run dense_layer.onnx $IDENTITY_4X4

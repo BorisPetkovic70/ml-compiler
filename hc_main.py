@@ -18,6 +18,7 @@ from front_end.build_model import (
     build_matmul_model, MATMUL_MODEL_PATH,
     build_chained_tensor_model, CHAINED_TENSOR_MODEL_PATH,
     build_batched_matmul_model, BATCHED_MATMUL_MODEL_PATH,
+    build_dense_layer_model, DENSE_LAYER_MODEL_PATH,
 )
 from front_end.loader import import_onnx_to_hc_module
 
@@ -57,6 +58,7 @@ def resolve_model_path(model_arg: str) -> Path:
             Path(MATMUL_MODEL_PATH).name: build_matmul_model,
             Path(CHAINED_TENSOR_MODEL_PATH).name: build_chained_tensor_model,
             Path(BATCHED_MATMUL_MODEL_PATH).name: build_batched_matmul_model,
+            Path(DENSE_LAYER_MODEL_PATH).name: build_dense_layer_model,
         }
         builders.get(model_path.name, build_score_model)(str(model_path))
     return model_path

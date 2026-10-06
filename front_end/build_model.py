@@ -2,7 +2,7 @@
 
 Each builder checks the model with `onnx.checker` and saves it to `path`
 (`_save`), by default `build/<name>.onnx`, creating the directory if needed. Running
-this module writes all five models.
+this module writes all six models.
 """
 import os
 import onnx
@@ -16,6 +16,7 @@ VEC_AFFINE_RELU_MODEL_PATH = os.path.join(BASE_DIR, "vec_affine_relu.onnx")
 MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "matmul.onnx")
 CHAINED_TENSOR_MODEL_PATH = os.path.join(BASE_DIR, "chained_tensor_math.onnx")
 BATCHED_MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "batched_matmul.onnx")
+DENSE_LAYER_MODEL_PATH = os.path.join(BASE_DIR, "dense_layer.onnx")
 
 
 def _save(model, path: str) -> None:
@@ -259,9 +260,59 @@ def build_batched_matmul_model(
     _save(model, path)
 
 
+def build_dense_layer_model(path: str = DENSE_LAYER_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
+    """Model with weights: Y = relu((X @ W) + B), with one input X:(MxK) and
+    two constant initializers, W:(KxN) and B:(MxN). W counts up row-major
+    from -5 and B repeats [3, -3] along each row. Neither is a splat, so
+    bufferization stores both as `memref.global`."""
+
+    # ------------------------------------------------------------
+    # Constant initializers (the weights)
+    # ------------------------------------------------------------
+    w_init = helper.make_tensor("w", TensorProto.INT32, [k, n], [i - 5 for i in range(k * n)])
+    b_init = helper.make_tensor("b", TensorProto.INT32, [m, n], ([3, -3] * n)[:n] * m)
+
+    # ------------------------------------------------------------
+    # Input / Output
+    # ------------------------------------------------------------
+    x = helper.make_tensor_value_info("x", TensorProto.INT32, [m, k])
+    y = helper.make_tensor_value_info("y", TensorProto.INT32, [m, n])
+
+    # ------------------------------------------------------------
+    # Graph nodes
+    # ------------------------------------------------------------
+    nodes = [
+        # mm_res = X @ W
+        helper.make_node("MatMul", ["x", "w"], ["mm_res"], name="matmul_xw"),
+
+        # add_res = mm_res + B
+        helper.make_node("Add", ["mm_res", "b"], ["add_res"], name="add_b"),
+
+        # y = ReLU(add_res)
+        helper.make_node("Relu", ["add_res"], ["y"], name="relu_out"),
+    ]
+
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="DenseLayerGraph",
+        inputs=[x],
+        outputs=[y],
+        initializer=[w_init, b_init],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[helper.make_opsetid("", 13)],
+        producer_name="dense_layer_builder",
+    )
+
+    _save(model, path)
+
+
 if __name__ == "__main__":
     build_score_model()
     build_vec_affine_relu_model()
     build_matmul_model()
     build_chained_tensor_model()
     build_batched_matmul_model()
+    build_dense_layer_model()

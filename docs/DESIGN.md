@@ -159,7 +159,9 @@ function owns like any other temporary.
 - any other op touches a tensor (for example, an `hc.*` op that was never lowered).
 
 Neither the copies nor the refusals are triggered by IR the current lowering produces,
-including a chained `hc.matmul` → `hc.relu_tensor` and a matmul with a weight.
+including a chained `hc.matmul` → `hc.relu_tensor` and a matmul with a weight. The
+`dense_layer` sample model (`relu(X @ W + B)`) shows all three buffer kinds at once: `X` is an
+input, `W` and `B` are weights, and the matmul and add results are temporaries.
 
 ## 5. Pass ordering and verification
 

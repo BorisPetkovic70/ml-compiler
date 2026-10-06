@@ -63,7 +63,7 @@ driver's argument reading and output format.
 ## Run
 
 ```bash
-python front_end/build_model.py    # write the 5 sample models to build/
+python front_end/build_model.py    # write the 6 sample models to build/
 
 python hc_main.py build/matmul.onnx          # import, lower, write .mlir + harness (no LLVM)
 python hc_interpret.py matmul.onnx [args...] # run in the interpreter, before and after the middle end
@@ -77,9 +77,10 @@ build/matmul_run [args...]                   # rerun a compiled model
 for the same arguments.
 
 - **Sample models:** `score_model` (scalar), `vec_affine_relu` (vector), `matmul`,
-  `chained_tensor_math` (ReLU(A@B + C)), `batched_matmul`.
+  `chained_tensor_math` (ReLU(A@B + C)), `batched_matmul`, `dense_layer` (ReLU(X@W + B), with
+  `W` and `B` stored in the model as weights).
 - **Model argument:** `matmul.onnx` and `build/matmul.onnx` are equivalent; the stem (`matmul`)
-  names every output file. If the file is missing, `hc_main.py` builds it — all five sample
+  names every output file. If the file is missing, `hc_main.py` builds it — all six sample
   models are recognized by name; **any other missing name still silently builds the scalar
   score model**.
 - **`TOOLCHAIN_BIN_DIR`:** directory holding `mlir-opt`/`mlir-translate`/`llc`. The default in
