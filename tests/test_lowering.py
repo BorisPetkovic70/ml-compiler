@@ -142,6 +142,21 @@ def test_tensor_binop(hc_op, arith_op):
     """)
 
 
+def test_equal_loop_bounds_share_one_constant():
+    """A 2x2 result needs the bound 2 twice; both loops use the same
+    constant."""
+    check_lowering("""
+    func.func @f(%x: tensor<2x2xi32>) -> tensor<2x2xi32> {
+      %r = "hc.relu_tensor"(%x) : (tensor<2x2xi32>) -> tensor<2x2xi32>
+      func.return %r : tensor<2x2xi32>
+    }""", """
+    // CHECK: %[[N:.*]] = arith.constant 2 : index
+    // CHECK-NOT: arith.constant 2 : index
+    // CHECK: scf.for %{{.*}} = %{{.*}} to %[[N]] step
+    // CHECK: scf.for %{{.*}} = %{{.*}} to %[[N]] step
+    """)
+
+
 def test_relu_tensor():
     check_lowering("""
     func.func @f(%x: tensor<2x3xi32>) -> tensor<2x3xi32> {

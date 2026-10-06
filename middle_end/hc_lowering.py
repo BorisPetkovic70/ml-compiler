@@ -23,6 +23,15 @@ def _const_i32(value: int) -> arith.ConstantOp:
     return arith.ConstantOp.from_int_and_width(value, 32)
 
 
+def _index_constants(*values: int) -> dict[int, arith.ConstantOp]:
+    """Returns one `index` constant per distinct value, keyed by the value, so
+    equal loop bounds share a constant."""
+    idx_ty = builtin.IndexType()
+    return {
+        v: arith.ConstantOp.from_int_and_width(v, idx_ty) for v in dict.fromkeys(values)
+    }
+
+
 # -----------------------------------------------------------------------------
 #  Vector lowering helpers
 # -----------------------------------------------------------------------------
@@ -79,13 +88,13 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
     idx_ty = builtin.IndexType()
 
     # loop-control constants must be index
-    c0, c1, c_m, c_n, c_k = (
-        arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n, k_dim)
-    )
+    bounds = (m, n, k_dim, batch_dim) if batched else (m, n, k_dim)
+    consts = _index_constants(0, 1, *bounds)
+    c0, c1, c_m, c_n, c_k = (consts[v] for v in (0, 1, m, n, k_dim))
     # Result tensor (full res_type, batch dim included). Its contents are
     # unspecified: the nest writes every element and reads none.
     empty_res = tensor.EmptyOp([], res_type)
-    setup_ops = [c0, c1, c_m, c_n, c_k, empty_res]
+    setup_ops = [*consts.values(), empty_res]
 
     # The batch loop, when present, is the outermost level: it carries the
     # full result tensor through iter_args exactly like the i loop does below,
@@ -94,8 +103,7 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
     i_init = empty_res.tensor
     batch_body = None
     if batched:
-        c_bdim = arith.ConstantOp.from_int_and_width(batch_dim, idx_ty)
-        setup_ops.append(c_bdim)
+        c_bdim = consts[batch_dim]
         batch_body = Block(arg_types=[idx_ty, res_type])
         bi, c_bi = batch_body.args
         prefix = [bi]
@@ -155,12 +163,12 @@ def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compu
     elem_ty = res_type.element_type
     idx_ty = builtin.IndexType()
 
-    c0, c1, c_m, c_n = (
-        arith.ConstantOp.from_int_and_width(v, idx_ty) for v in (0, 1, m, n)
-    )
+    bounds = (m, n, batch_dim) if batched else (m, n)
+    consts = _index_constants(0, 1, *bounds)
+    c0, c1, c_m, c_n = (consts[v] for v in (0, 1, m, n))
     # Its contents are unspecified: the nest writes every element and reads none.
     empty_res = tensor.EmptyOp([], res_type)
-    setup_ops = [c0, c1, c_m, c_n, empty_res]
+    setup_ops = [*consts.values(), empty_res]
 
     # The batch loop, when present, is the outermost level: it carries the
     # full result tensor through iter_args exactly like the i loop does below,
@@ -169,8 +177,7 @@ def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compu
     i_init = empty_res.tensor
     batch_body = None
     if batched:
-        c_bdim = arith.ConstantOp.from_int_and_width(batch_dim, idx_ty)
-        setup_ops.append(c_bdim)
+        c_bdim = consts[batch_dim]
         batch_body = Block(arg_types=[idx_ty, res_type])
         bi, c_bi = batch_body.args
         prefix = [bi]

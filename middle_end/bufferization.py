@@ -86,9 +86,12 @@ def _fill_ops(buf: SSAValue, tensor_ty: TensorType, value: int) -> list[Operatio
     """Ops that store `value` into every element of `buf`: a rank-deep scf.for nest."""
     idx = IndexType()
     dims = [_dim(d) for d in tensor_ty.shape]
-    c0 = arith.ConstantOp.from_int_and_width(0, idx)
-    c1 = arith.ConstantOp.from_int_and_width(1, idx)
-    bounds = [arith.ConstantOp.from_int_and_width(d, idx) for d in dims]
+    # one index constant per distinct value, so equal bounds share one
+    consts = {
+        v: arith.ConstantOp.from_int_and_width(v, idx) for v in dict.fromkeys([0, 1, *dims])
+    }
+    c0, c1 = consts[0], consts[1]
+    bounds = [consts[d] for d in dims]
     scalar = arith.ConstantOp.from_int_and_width(value, tensor_ty.element_type)
 
     bodies = [Block(arg_types=[idx]) for _ in dims]
@@ -99,7 +102,7 @@ def _fill_ops(buf: SSAValue, tensor_ty: TensorType, value: int) -> list[Operatio
         if loop is not None:
             bodies[d].add_ops([loop, scf.YieldOp()])
         loop = scf.ForOp(c0.result, bounds[d].result, c1.result, [], Region(bodies[d]))
-    return [c0, c1, *bounds, scalar, loop]
+    return [*consts.values(), scalar, loop]
 
 
 # -----------------------------------------------------------------------------
