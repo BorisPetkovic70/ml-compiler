@@ -53,8 +53,9 @@ The suite tests the compiler in two ways:
   the middle end, and both results must equal a hand-computed value or NumPy's. They show that
   the emitted code is *correct*.
 
-`test_dialect.py` checks each op's verifier, `test_loader.py` the ONNX import, and
-`test_interpreter.py` the interpreter itself.
+`test_dialect.py` checks each op's verifier, `test_loader.py` the ONNX import,
+`test_interpreter.py` the interpreter itself, and `test_hc_interpret.py` the interpreter
+driver's argument reading and output format.
 
 `tests/test_compiled_backend.py` compiles and runs real executables. It is skipped unless
 `mlir-opt`, `mlir-translate`, `llc` and `clang` are all on `PATH` (so it is always skipped in CI).
@@ -64,11 +65,16 @@ The suite tests the compiler in two ways:
 ```bash
 python front_end/build_model.py    # write the 5 sample models to build/
 
-python hc_main.py build/matmul.onnx          # import, lower, interpret, write .mlir + harness (no LLVM)
+python hc_main.py build/matmul.onnx          # import, lower, write .mlir + harness (no LLVM)
+python hc_interpret.py matmul.onnx [args...] # run in the interpreter, before and after the middle end
 
-TOOLCHAIN_BIN_DIR=/path/to/llvm/bin ./full_compiler.sh matmul.onnx [args...]   # + compile and run
+TOOLCHAIN_BIN_DIR=/path/to/llvm/bin ./full_compiler.sh matmul.onnx [args...]   # both + compile, run, compare
+TOOLCHAIN_BIN_DIR=/path/to/llvm/bin ./run_all_models.sh                        # every sample model, fixed inputs
 build/matmul_run [args...]                   # rerun a compiled model
 ```
+
+`full_compiler.sh` fails unless the executable prints exactly what the interpreter computes
+for the same arguments.
 
 - **Sample models:** `score_model` (scalar), `vec_affine_relu` (vector), `matmul`,
   `chained_tensor_math` (ReLU(A@B + C)), `batched_matmul`.
@@ -78,8 +84,9 @@ build/matmul_run [args...]                   # rerun a compiled model
   score model**.
 - **`TOOLCHAIN_BIN_DIR`:** directory holding `mlir-opt`/`mlir-translate`/`llc`. The default in
   `back_end/back_end.sh` is a machine-specific path; override it with the env var.
-- **Executable args:** one integer per scalar, per vector lane, or per buffer element, in argument
-  order. Missing args fall back to built-in defaults.
+- **Args** (executable and `hc_interpret.py`): one integer per scalar, per vector lane, or per
+  buffer element, in argument order. Missing args fall back to the same built-in defaults in
+  both.
 
 ## Generated files
 
@@ -97,8 +104,10 @@ build/matmul_run [args...]                   # rerun a compiled model
 
 ```
 hc_dialect.py           the hc dialect: scalar, vector (*_vec) and tensor (*_tensor, matmul) ops
-hc_main.py              driver: ONNX → hc → middle end → .mlir + harness, with interpreter checks
-full_compiler.sh        hc_main.py + back_end/back_end.sh
+hc_main.py              compile driver: ONNX → hc → middle end → .mlir + harness
+hc_interpret.py         interpreter driver: runs a model on given arguments, before and after the middle end
+full_compiler.sh        hc_main.py + hc_interpret.py + back_end/back_end.sh, then compares the two results
+run_all_models.sh       full_compiler.sh on every sample model, with fixed inputs
 front_end/              loader.py (ONNX → hc), build_model.py (sample models)
 middle_end/             pipeline.py, hc_lowering.py, bufferization.py, constant_folding.py,
                         dead_code_elimination.py, analysis.py

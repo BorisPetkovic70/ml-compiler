@@ -175,7 +175,7 @@ each switchable via `MiddleEndPipelineConfig`.
 
 The pipeline **never calls `module.verify()`**. Whether and when to verify is the caller's
 choice: `tests/conftest.py::lower()` verifies right after the pipeline, while `hc_main.py`
-relies on the interpreter's before/after comparison.
+does not verify and `hc_interpret.py` compares the interpreter's result before and after.
 
 ## 6. The ABI boundary
 
@@ -236,6 +236,10 @@ The suite has three layers:
   emitted code computes the right thing.
 - **Compiled-path tests** (`tests/test_compiled_backend.py`) check the executable's output
   against NumPy or plain Python, since the interpreter never runs the ABI path.
+
+Outside the suite, `full_compiler.sh` applies the same idea to whatever arguments it is given:
+`hc_interpret.py` reads them the way the generated harness does and prints its result in the
+harness's format, and the script fails unless the executable prints the same text.
 
 ## 8. Known limits
 
