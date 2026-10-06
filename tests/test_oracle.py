@@ -136,7 +136,9 @@ def test_read_before_write_in_place():
     check_oracle("""
     func.func @f(%d: i32) -> i32 {
       %c0 = arith.constant 0 : index
-      %t = arith.constant dense<5> : tensor<2x2xi32>
+      %five = arith.constant 5 : i32
+      %e = tensor.empty() : tensor<2x2xi32>
+      %t = tensor.insert %five into %e[%c0, %c0] : tensor<2x2xi32>
       %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
       %inc = arith.addi %old, %d : i32
       %t2 = tensor.insert %inc into %t[%c0, %c0] : tensor<2x2xi32>

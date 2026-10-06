@@ -126,8 +126,7 @@ rather than edited in place, because an `scf.for`'s number of `iter_args` can't 
 |---|---|
 | tensor function argument | memref argument (read-only; not owned) |
 | `tensor.empty` (an op's result) | `memref.alloc`, left unfilled |
-| splat `arith.constant dense<c> : tensor<…>` | `memref.alloc` + a loop nest storing `c` |
-| other tensor constant (a weight) | module-level `memref.global constant` + `memref.get_global` (read-only; not owned) |
+| tensor constant (a weight) | module-level `memref.global constant` + `memref.get_global` (read-only; not owned) |
 | `tensor.extract %t[idx]` | `memref.load %m[idx]` |
 | `tensor.insert %v into %t[idx]` | `memref.store %v, %m[idx]`, where `%m` is `%t`'s buffer or a copy of it (see below) |
 | tensor `iter_args` / yields | dropped (scalar ones kept); the loop writes into its init's buffer or a copy of it |
@@ -158,7 +157,7 @@ function owns like any other temporary.
   allocated once per iteration could not be;
 - a loop yields a different buffer than the one it carries;
 - the function body has more than one block;
-- a tensor constant sits inside a nested region;
+- a `tensor.empty` sits inside a nested region;
 - any other op touches a tensor (for example, an `hc.*` op that was never lowered).
 
 Neither the copies nor the refusals are triggered by IR the current lowering produces,

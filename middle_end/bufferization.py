@@ -4,8 +4,7 @@ ownership rules, and full refusal list are in docs/DESIGN.md Section 4.
 `apply_bufferization` rewrites each tensor-using func.func in place:
 - tensors become memrefs;
 - `tensor.empty` becomes a bare `memref.alloc`;
-- splat tensor constants become `memref.alloc` plus a fill loop nest;
-- other tensor constants (weights) become a read-only `memref.global`;
+- tensor constants (weights) become a read-only `memref.global`;
 - extract/insert become load/store;
 - tensor `iter_args` are dropped;
 - a write goes into the tensor's own buffer when the function owns it and
@@ -27,7 +26,7 @@ checks.
 """
 from xdsl.dialects import arith, func, memref, scf
 from xdsl.dialects.builtin import (
-    FunctionType, IndexType, MemRefType, ModuleOp, StringAttr, TensorType, UnitAttr,
+    FunctionType, MemRefType, ModuleOp, StringAttr, TensorType, UnitAttr,
 )
 from xdsl.ir import Block, Operation, Region, SSAValue
 
@@ -82,29 +81,6 @@ def _dim(d) -> int:
     return int(getattr(d, "data", d))
 
 
-def _fill_ops(buf: SSAValue, tensor_ty: TensorType, value: int) -> list[Operation]:
-    """Ops that store `value` into every element of `buf`: a rank-deep scf.for nest."""
-    idx = IndexType()
-    dims = [_dim(d) for d in tensor_ty.shape]
-    # one index constant per distinct value, so equal bounds share one
-    consts = {
-        v: arith.ConstantOp.from_int_and_width(v, idx) for v in dict.fromkeys([0, 1, *dims])
-    }
-    c0, c1 = consts[0], consts[1]
-    bounds = [consts[d] for d in dims]
-    scalar = arith.ConstantOp.from_int_and_width(value, tensor_ty.element_type)
-
-    bodies = [Block(arg_types=[idx]) for _ in dims]
-    ivs = [b.args[0] for b in bodies]
-    bodies[-1].add_ops([memref.StoreOp.get(scalar.result, buf, ivs), scf.YieldOp()])
-    loop = None
-    for d in reversed(range(len(dims))):
-        if loop is not None:
-            bodies[d].add_ops([loop, scf.YieldOp()])
-        loop = scf.ForOp(c0.result, bounds[d].result, c1.result, [], Region(bodies[d]))
-    return [*consts.values(), scalar, loop]
-
-
 # -----------------------------------------------------------------------------
 #  The pass
 # -----------------------------------------------------------------------------
@@ -151,7 +127,7 @@ class _Bufferizer:
     def _translate(self, ops: list[Operation], new_block: Block) -> None:
         for op in ops:
             if op.name == "arith.constant" and _is_tensor(op.results[0]):
-                self._tensor_constant(op, new_block)
+                self._constant(op, new_block)
             elif op.name == "tensor.empty":
                 self._empty(op, new_block)
             elif op.name == "tensor.extract":
@@ -201,21 +177,7 @@ class _Bufferizer:
             )
         return self._copy(buf, new_block)
 
-    # ---- tensor constant -> alloc + fill, or a read-only global -----------------
-    def _tensor_constant(self, op: arith.ConstantOp, new_block: Block) -> None:
-        if new_block is not self.entry:
-            raise NotImplementedError("bufferization: tensor constants inside a nested region")
-        values = list(op.value.get_values())
-        ty = op.results[0].type
-        if len(set(values)) != 1:
-            self._global_constant(op, new_block)
-            return
-        alloc = memref.AllocOp.get(ty.element_type, shape=[_dim(d) for d in ty.shape])
-        buf = alloc.memref
-        new_block.add_ops([alloc, *_fill_ops(buf, ty, values[0])])
-        self.bufs[op.results[0]] = buf
-        self.owned.append(buf)
-
+    # ---- tensor.empty -> alloc; tensor constant -> read-only global -------------
     def _empty(self, op: Operation, new_block: Block) -> None:
         """A tensor with unspecified contents: an owned buffer, left unfilled."""
         if new_block is not self.entry:
@@ -226,10 +188,10 @@ class _Bufferizer:
         self.bufs[op.results[0]] = alloc.memref
         self.owned.append(alloc.memref)
 
-    def _global_constant(self, op: arith.ConstantOp, new_block: Block) -> None:
-        """A weight: its data goes into a module-level `memref.global constant`,
-        read through `memref.get_global`. The buffer is not owned, so it is
-        never written to or deallocated."""
+    def _constant(self, op: arith.ConstantOp, new_block: Block) -> None:
+        """A tensor constant (a weight): its data goes into a module-level
+        `memref.global constant`, read through `memref.get_global`. The buffer
+        is not owned, so it is never written to or deallocated."""
         mem_ty = _memref_type(op.results[0].type)
         name = f"__constant_{sum(isinstance(o, memref.GlobalOp) for o in self.module.ops)}"
         glob = memref.GlobalOp.get(StringAttr(name), mem_ty, op.value, constant=UnitAttr())

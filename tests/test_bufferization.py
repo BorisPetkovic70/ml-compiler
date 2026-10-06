@@ -65,25 +65,6 @@ def test_matmul_result_becomes_an_unfilled_buffer():
     """)
 
 
-def test_splat_constant_becomes_a_filled_buffer():
-    """A constant whose elements are all equal becomes a `memref.alloc` plus
-    a row-major nest that stores the value into every element."""
-    check_bufferization("""
-    func.func @f() -> tensor<2x4xi32> {
-      %t = arith.constant dense<7> : tensor<2x4xi32>
-      func.return %t : tensor<2x4xi32>
-    }""", """
-    // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x4xi32>
-    // CHECK-DAG: %[[ROWS:.*]] = arith.constant 2 : index
-    // CHECK-DAG: %[[COLS:.*]] = arith.constant 4 : index
-    // CHECK-DAG: %[[SEVEN:.*]] = arith.constant 7 : i32
-    // CHECK: scf.for %[[FI:.*]] = %{{.*}} to %[[ROWS]] step %{{.*}} {
-    // CHECK-NEXT: scf.for %[[FJ:.*]] = %{{.*}} to %[[COLS]] step %{{.*}} {
-    // CHECK-NEXT: memref.store %[[SEVEN]], %[[BUF]][%[[FI]], %[[FJ]]] : memref<2x4xi32>
-    // CHECK: func.return %[[BUF]] : memref<2x4xi32>
-    """)
-
-
 def test_matmul_nest_loads_and_stores_in_place():
     """Extracts become loads and the insert becomes a store into the result
     buffer. The i and j loops no longer carry the tensor (no iter_args),
@@ -104,29 +85,32 @@ def test_matmul_nest_loads_and_stores_in_place():
 
 
 def test_temporary_buffer_is_deallocated():
-    """Both constants get a buffer from this pass. `%tmp` is only read, so its
-    buffer is freed before the return. `%out` is returned, so the caller owns
-    it."""
+    """Both `tensor.empty` ops get a buffer from this pass. `%tmp` is not
+    returned, so its buffer is freed before the return. `%out` is returned,
+    so the caller owns it."""
     check_bufferization("""
-    func.func @f() -> tensor<2x2xi32> {
+    func.func @f(%v: i32) -> tensor<2x2xi32> {
       %c0 = arith.constant 0 : index
-      %tmp = arith.constant dense<7> : tensor<2x2xi32>
-      %out = arith.constant dense<0> : tensor<2x2xi32>
+      %e = tensor.empty() : tensor<2x2xi32>
+      %tmp = tensor.insert %v into %e[%c0, %c0] : tensor<2x2xi32>
+      %out = tensor.empty() : tensor<2x2xi32>
       %x = tensor.extract %tmp[%c0, %c0] : tensor<2x2xi32>
       %r = tensor.insert %x into %out[%c0, %c0] : tensor<2x2xi32>
       func.return %r : tensor<2x2xi32>
     }""", """
+    // CHECK: func.func @f(%[[V:.*]]: i32) -> memref<2x2xi32>
     // CHECK: %[[TMP:.*]] = memref.alloc() : memref<2x2xi32>
-    // CHECK: %[[OUT:.*]] = memref.alloc() : memref<2x2xi32>
-    // CHECK: %[[X:.*]] = memref.load %[[TMP]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: memref.store %[[V]], %[[TMP]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: %[[OUT:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: %[[X:.*]] = memref.load %[[TMP]][%c0, %c0] : memref<2x2xi32>
     // CHECK-NEXT: memref.store %[[X]], %[[OUT]][%c0, %c0] : memref<2x2xi32>
     // CHECK-NEXT: memref.dealloc %[[TMP]] : memref<2x2xi32>
     // CHECK-NEXT: func.return %[[OUT]] : memref<2x2xi32>
     """)
 
 
-def test_weight_constant_becomes_a_read_only_global():
-    """A constant with different values (a weight) becomes a module-level
+def test_constant_becomes_a_read_only_global():
+    """A tensor constant (a weight) becomes a module-level
     `memref.global constant`, read through `memref.get_global`. The data
     lives in the executable, so the buffer is never deallocated. xDSL prints
     `memref.global` in generic form."""
@@ -198,7 +182,9 @@ def test_read_before_write_stores_in_place():
     func.func @f() -> i32 {
       %c0 = arith.constant 0 : index
       %one = arith.constant 1 : i32
-      %t = arith.constant dense<5> : tensor<2x2xi32>
+      %five = arith.constant 5 : i32
+      %e = tensor.empty() : tensor<2x2xi32>
+      %t = tensor.insert %five into %e[%c0, %c0] : tensor<2x2xi32>
       %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
       %inc = arith.addi %old, %one : i32
       %t2 = tensor.insert %inc into %t[%c0, %c0] : tensor<2x2xi32>
@@ -206,7 +192,8 @@ def test_read_before_write_stores_in_place():
       func.return %x : i32
     }""", """
     // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x2xi32>
-    // CHECK: %[[OLD:.*]] = memref.load %[[BUF]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: memref.store %five, %[[BUF]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: %[[OLD:.*]] = memref.load %[[BUF]][%c0, %c0] : memref<2x2xi32>
     // CHECK-NEXT: %[[INC:.*]] = arith.addi %[[OLD]], %one : i32
     // CHECK-NEXT: memref.store %[[INC]], %[[BUF]][%c0, %c0] : memref<2x2xi32>
     // CHECK-NEXT: %[[X:.*]] = memref.load %[[BUF]][%c0, %c0] : memref<2x2xi32>
@@ -216,20 +203,23 @@ def test_read_before_write_stores_in_place():
 
 
 def test_insert_into_a_tensor_read_afterwards_writes_to_a_copy():
-    """`%old` must still read 0 after the insert. A store into `%t`'s buffer
+    """`%old` must still read 5 after the insert. A store into `%t`'s buffer
     would make it read 9, so the store goes into a copy and `%old` loads
     from the original. Both buffers are temporaries."""
     check_bufferization("""
     func.func @f() -> i32 {
       %c0 = arith.constant 0 : index
       %v = arith.constant 9 : i32
-      %t = arith.constant dense<0> : tensor<2x2xi32>
+      %five = arith.constant 5 : i32
+      %e = tensor.empty() : tensor<2x2xi32>
+      %t = tensor.insert %five into %e[%c0, %c0] : tensor<2x2xi32>
       %t2 = tensor.insert %v into %t[%c0, %c0] : tensor<2x2xi32>
       %old = tensor.extract %t[%c0, %c0] : tensor<2x2xi32>
       func.return %old : i32
     }""", """
     // CHECK: %[[T:.*]] = memref.alloc() : memref<2x2xi32>
-    // CHECK: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: memref.store %five, %[[T]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
     // CHECK-NEXT: "memref.copy"(%[[T]], %[[COPY]]) : (memref<2x2xi32>, memref<2x2xi32>) -> ()
     // CHECK-NEXT: memref.store %v, %[[COPY]][%c0, %c0] : memref<2x2xi32>
     // CHECK-NEXT: %[[OLD:.*]] = memref.load %[[T]][%c0, %c0] : memref<2x2xi32>
@@ -252,7 +242,7 @@ def test_refuses_insert_in_a_loop_into_a_tensor_defined_outside_it():
           %c2 = arith.constant 2 : index
           %v = arith.constant 9 : i32
           %z = arith.constant 0 : i32
-          %t = arith.constant dense<0> : tensor<2x2xi32>
+          %t = tensor.empty() : tensor<2x2xi32>
           %r = scf.for %i = %c0 to %c2 step %c1 iter_args(%acc = %z) -> (i32) {
             %t2 = tensor.insert %v into %t[%i, %c0] : tensor<2x2xi32>
             %x = tensor.extract %t2[%c0, %c0] : tensor<2x2xi32>
@@ -261,6 +251,25 @@ def test_refuses_insert_in_a_loop_into_a_tensor_defined_outside_it():
           }
           func.return %r : i32
         }""")
+
+
+def test_insert_into_a_constant_writes_to_a_copy():
+    """A constant's data is read-only, so the store goes into a copy of the
+    global. The function owns the copy, so it is returned as it is."""
+    check_bufferization("""
+    func.func @f(%v: i32) -> tensor<2x2xi32> {
+      %c0 = arith.constant 0 : index
+      %w = arith.constant dense<7> : tensor<2x2xi32>
+      %r = tensor.insert %v into %w[%c0, %c0] : tensor<2x2xi32>
+      func.return %r : tensor<2x2xi32>
+    }""", """
+    // CHECK: func.func @f(%[[V:.*]]: i32) -> memref<2x2xi32>
+    // CHECK: %[[W:.*]] = memref.get_global @__constant_0 : memref<2x2xi32>
+    // CHECK-NEXT: %[[COPY:.*]] = memref.alloc() : memref<2x2xi32>
+    // CHECK-NEXT: "memref.copy"(%[[W]], %[[COPY]]) : (memref<2x2xi32>, memref<2x2xi32>) -> ()
+    // CHECK-NEXT: memref.store %[[V]], %[[COPY]][%c0, %c0] : memref<2x2xi32>
+    // CHECK-NEXT: func.return %[[COPY]] : memref<2x2xi32>
+    """)
 
 
 def test_insert_into_a_function_argument_writes_to_a_copy():

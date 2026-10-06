@@ -263,8 +263,8 @@ def build_batched_matmul_model(
 def build_dense_layer_model(path: str = DENSE_LAYER_MODEL_PATH, m: int = 4, k: int = 4, n: int = 4):
     """Model with weights: Y = relu((X @ W) + B), with one input X:(MxK) and
     two constant initializers, W:(KxN) and B:(MxN). W counts up row-major
-    from -5 and B repeats [3, -3] along each row. Neither is a splat, so
-    bufferization stores both as `memref.global`."""
+    from -5 and B repeats [3, -3] along each row. Bufferization stores both
+    as `memref.global`."""
 
     # ------------------------------------------------------------
     # Constant initializers (the weights)
