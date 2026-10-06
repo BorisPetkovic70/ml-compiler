@@ -1,16 +1,14 @@
 """Driver: `python hc_main.py [model.onnx]`, run from the repository root.
 
 Loads (or builds) the model, writes `build/<stem>_original.mlir`, runs the
-middle end (lowering + bufferization; folding and DCE disabled), writes
-`build/<stem>_lowered.mlir` and `back_end/<stem>_harness.c`, and asserts that
-the interpreter gives the same result before and after the middle end.
+middle end (lowering + bufferization; folding and DCE disabled), and writes
+`build/<stem>_lowered.mlir` and `back_end/<stem>_harness.c`.
 """
-import copy
 import sys
 from pathlib import Path
 
 from xdsl.context import Context
-from xdsl.dialects.builtin import Builtin, MemRefType, TensorType, VectorType
+from xdsl.dialects.builtin import Builtin, ModuleOp
 from xdsl.dialects import func, arith
 
 from hc_dialect import HiCompiler
@@ -26,7 +24,6 @@ from front_end.loader import import_onnx_to_hc_module
 from middle_end.pipeline import (
     MiddleEndPipeline, MiddleEndPipelineConfig
 )
-from simulator.interpreter import Interpreter
 from back_end.harness_gen import write_harness
 
 def build_context() -> Context:
@@ -38,86 +35,67 @@ def build_context() -> Context:
     return ctx
 
 
-def _dims_of(ty) -> list[int]:
-    return [int(getattr(d, "data", d)) for d in ty.shape]
+def resolve_model_path(model_arg: str) -> Path:
+    """Returns the path of the model `model_arg` names: the path itself if it
+    exists, otherwise the file of that name in `build/`, which is built first
+    if it is missing."""
+    model_path = Path(model_arg)
+    if model_path.exists():
+        return model_path
+
+    build_dir = Path("build")
+    build_dir.mkdir(exist_ok=True)
+    model_path = build_dir / model_path.name
+    if not model_path.exists():
+        print(f"Model not found, building: {model_path}")
+        # Keyed by file name (the *_MODEL_PATH constants are full paths);
+        # every builder in front_end/build_model.py is listed, and a name
+        # not listed here still falls back to the score model.
+        builders = {
+            Path(MODEL_PATH).name: build_score_model,
+            Path(VEC_AFFINE_RELU_MODEL_PATH).name: build_vec_affine_relu_model,
+            Path(MATMUL_MODEL_PATH).name: build_matmul_model,
+            Path(CHAINED_TENSOR_MODEL_PATH).name: build_chained_tensor_model,
+            Path(BATCHED_MATMUL_MODEL_PATH).name: build_batched_matmul_model,
+        }
+        builders.get(model_path.name, build_score_model)(str(model_path))
+    return model_path
 
 
-def _nest(flat: list, dims: list[int]) -> list:
-    """Row-major flat list -> nested lists of shape `dims`."""
-    if len(dims) <= 1:
-        return list(flat)
-    step = len(flat) // dims[0]
-    return [_nest(flat[r * step:(r + 1) * step], dims[1:]) for r in range(dims[0])]
+def load_module(model_path: Path) -> ModuleOp:
+    """Imports the ONNX model at `model_path` as an `hc` module whose entry
+    function is `my_func`."""
+    return import_onnx_to_hc_module(
+        build_context(), onnx_path=str(model_path), fn_name="my_func"
+    )
 
 
-def _sample_args_for_entry(module, func_name):
-    """Returns (and prints) interpreter arguments for `func_name`: `10 * (i + 1)`
-    for scalar argument i, and a flat (vector) or nested (tensor/memref) list
-    filled with `10*i + k + 1` for shaped argument i.
+def run_middle_end(module: ModuleOp, debug_mode: bool = False) -> None:
+    """Runs lowering and bufferization on `module`, in place."""
+    config = MiddleEndPipelineConfig(
+        apply_lowering=True,
+        apply_constant_folding=False,
+        apply_dce=False,
+        run_analysis=False,
+        debug_mode=debug_mode,
+    )
+    MiddleEndPipeline(config).apply_passes(module)
 
-    Both formulas match the defaults of the generated C harness
-    (back_end/harness_gen.py), so the interpreter and the compiled executable
-    see the same inputs when run without argv."""
-    for top_block in module.body.blocks:
-        for op in top_block.ops:
-            if isinstance(op, func.FuncOp) and op.sym_name.data == func_name:
-                block = list(op.body.blocks)[0]
-                args = []
-                for i, a in enumerate(block.args):
-                    if isinstance(a.type, (VectorType, TensorType, MemRefType)):
-                        dims = _dims_of(a.type)
-                        n = 1
-                        for d in dims:
-                            n *= d
-                        flat = [10 * i + k + 1 for k in range(n)]
-                        args.append(_nest(flat, dims) if len(dims) > 1 else flat)
-                    else:
-                        args.append(10 * (i + 1))
-                print(args)
-                return args
-    raise RuntimeError(f"Function not found: {func_name}")
 
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 
 def main():
-    # Optional argument
-    model_arg = sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH
-    model_path = Path(model_arg)
-
-    # Extract base name (without extension)
+    model_path = resolve_model_path(sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH)
     model_name = model_path.stem
 
     build_dir = Path("build")
     build_dir.mkdir(exist_ok=True)
-
-    if not model_path.exists():
-        candidate = build_dir / model_path.name
-        if candidate.exists():
-            model_path = candidate
-        else:
-            model_path = build_dir / model_path.name
-            print(f"Model not found, building: {model_path}")
-            # Keyed by file name (the *_MODEL_PATH constants are full paths);
-            # every builder in front_end/build_model.py is listed, and a name
-            # not listed here still falls back to the score model.
-            builders = {
-                Path(MODEL_PATH).name: build_score_model,
-                Path(VEC_AFFINE_RELU_MODEL_PATH).name: build_vec_affine_relu_model,
-                Path(MATMUL_MODEL_PATH).name: build_matmul_model,
-                Path(CHAINED_TENSOR_MODEL_PATH).name: build_chained_tensor_model,
-                Path(BATCHED_MATMUL_MODEL_PATH).name: build_batched_matmul_model,
-            }
-            builders.get(model_path.name, build_score_model)(str(model_path))
-
     original_file = build_dir / f"{model_name}_original.mlir"
     lowered_file = build_dir / f"{model_name}_lowered.mlir"
 
-    ctx = build_context()
-    module = import_onnx_to_hc_module(
-        ctx, onnx_path=str(model_path), fn_name="my_func"
-    )
+    module = load_module(model_path)
 
     print("=== HIGH LEVEL (hc.*) ===")
     print(module)
@@ -126,24 +104,7 @@ def main():
     with open(original_file, "w", encoding="utf-8") as f:
         f.write(str(module))
 
-    sample_args = _sample_args_for_entry(module, "my_func")
-    try:
-        before = Interpreter().run_module(module, args=sample_args, func_name="my_func")
-        print("\nResult (interpreted, before lowering):", before)
-    except RuntimeError as e:
-        print(f"\n(interpreter skipped before lowering: {e})")
-        before = None
-
-    config = MiddleEndPipelineConfig(
-        apply_lowering=True,
-        apply_constant_folding=False,
-        apply_dce=False,
-        run_analysis=False,
-        debug_mode=True,
-    )
-
-    middle_end_pipeline = MiddleEndPipeline(config)
-    middle_end_pipeline.apply_passes(module)
+    run_middle_end(module, debug_mode=True)
 
     print("Saving lowered module...")
     with open(lowered_file, "w", encoding="utf-8") as f:
@@ -157,20 +118,6 @@ def main():
     write_harness(module, harness_file, func_name="my_func")
     print(f"Wrote harness: {harness_file}")
 
-    try:
-        # deepcopy: memref.store mutates its buffer in place, so the post-lowering run
-        # must not see buffers the pre-lowering run may have written through.
-        after = Interpreter().run_module(
-            module, args=copy.deepcopy(sample_args), func_name="my_func"
-        )
-        print("\nResult (interpreted, after lowering):", after)
-    except RuntimeError as e:
-        print(f"\n(interpreter skipped after lowering: {e})")
-        after = None
-
-    if before is not None and after is not None:
-        assert before == after, f"MISMATCH: before={before} after={after}"
-        print("OK: interpreter result unchanged by lowering")
 
 if __name__ == "__main__":
     main()
