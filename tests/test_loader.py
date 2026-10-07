@@ -106,11 +106,16 @@ def test_multiple_inputs_all_bound_as_block_args(tmp_path, ctx):
     assert len(fn.function_type.inputs.data) == 2
 
 
-def test_pow_rejects_tensor_operand(tmp_path, ctx):
-    """`hc.pow` is scalar-only, and the error names the ONNX node."""
-    path = _save_one_node_model(tmp_path, "Pow", [("a", [4]), ("b", [4])], [4], name="p")
-    with pytest.raises(NotImplementedError, match="Pow node 'p'"):
-        import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+@pytest.mark.parametrize("op_type,expected_hc_op", [
+    ("Pow", "hc.pow"), ("Max", "hc.max"), ("Min", "hc.min"),
+])
+def test_pow_max_min_take_tensors(tmp_path, ctx, op_type, expected_hc_op):
+    """2x3 with 3: the result type is the broadcast shape."""
+    path = _save_one_node_model(tmp_path, op_type, [("a", [2, 3]), ("b", [3])], [2, 3])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    op = find_op(module, expected_hc_op, "my_func")
+    assert [d.data for d in op.results[0].type.shape] == [2, 3]
+    module.verify()
 
 
 def test_matmul_dispatches_to_hc_matmul(tmp_path, ctx):

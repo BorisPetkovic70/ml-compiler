@@ -12,34 +12,53 @@ from hc_dialect import (
     broadcast_shape,
 )
 
-SCALAR_BINOPS = [HCAdd, HCMul, HCSub]
+BINOPS = [HCAdd, HCMul, HCSub, HCPow, HCMax, HCMin]
 TENSOR_BINOPS = [HCAddTensor, HCSubTensor, HCMulTensor]
 
 
-@pytest.mark.parametrize("op_cls", SCALAR_BINOPS)
-def test_scalar_binop_constructs(op_cls):
+@pytest.mark.parametrize("op_cls", BINOPS)
+def test_binop_constructs_on_scalars(op_cls):
     a, b = const_i32(3), const_i32(4)
     op = op_cls(operands=[a.result, b.result], result_types=[a.result.type])
     op.verify()
 
 
-@pytest.mark.parametrize("op_cls", SCALAR_BINOPS)
-def test_scalar_binop_rejects_mismatched_operand_types(op_cls):
-    """IRDL's bare operand_def(IntegerType) doesn't bind operand widths
-    together, so a mismatched-width pair only verify_() catches."""
+@pytest.mark.parametrize("op_cls", BINOPS)
+def test_binop_constructs_on_tensors(op_cls):
+    """2x3 with 3 broadcasts to 2x3, so the result is a tensor."""
+    blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(3)])
+    a, b = blk.args
+    op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3)])
+    op.verify()
+
+
+@pytest.mark.parametrize("op_cls", BINOPS)
+def test_binop_rejects_mismatched_operand_types(op_cls):
+    """The operand constraint doesn't bind the two widths together, so only
+    verify_() catches an i32 with an i16."""
     blk = Block(arg_types=[IntegerType(32), IntegerType(16)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[IntegerType(32)])
-    with pytest.raises(ValueError, match="same integer type"):
+    with pytest.raises(ValueError, match="same element type"):
         op.verify()
 
 
-@pytest.mark.parametrize("op_cls", SCALAR_BINOPS)
-def test_scalar_binop_rejects_mismatched_result_type(op_cls):
+@pytest.mark.parametrize("op_cls", BINOPS)
+def test_binop_rejects_mismatched_result_type(op_cls):
     """Operands match each other but the result type differs."""
     a, b = const_i32(2), const_i32(3)
     op = op_cls(operands=[a.result, b.result], result_types=[IntegerType(16)])
-    with pytest.raises(ValueError, match="same integer type"):
+    with pytest.raises(ValueError, match="result type must be i32"):
+        op.verify()
+
+
+@pytest.mark.parametrize("op_cls", BINOPS)
+def test_binop_rejects_scalar_result_for_a_tensor_operand(op_cls):
+    """One tensor operand makes the result a tensor."""
+    blk = Block(arg_types=[IntegerType(32), tensor_ty(2, 3)])
+    s, t = blk.args
+    op = op_cls(operands=[s, t], result_types=[IntegerType(32)])
+    with pytest.raises(ValueError, match="result type must be tensor<2x3xi32>"):
         op.verify()
 
 
@@ -49,37 +68,17 @@ def test_relu_constructs():
     op.verify()
 
 
-def test_relu_rejects_result_type_mismatch():
-    x = const_i32(5)
-    op = HCRelu(operands=[x.result], result_types=[IntegerType(16)])
-    with pytest.raises(ValueError, match="must match operand type"):
-        op.verify()
-
-
-@pytest.mark.parametrize("op_cls", [HCPow, HCMax, HCMin])
-def test_same_type_scalar_binop_constructs(op_cls):
-    a, b = const_i32(2), const_i32(3)
-    op = op_cls(operands=[a.result, b.result], result_types=[a.result.type])
+def test_relu_constructs_on_a_tensor():
+    blk = Block(arg_types=[tensor_ty(2, 3)])
+    (x,) = blk.args
+    op = HCRelu(operands=[x], result_types=[tensor_ty(2, 3)])
     op.verify()
 
 
-@pytest.mark.parametrize("op_cls", [HCPow, HCMax, HCMin])
-def test_same_type_scalar_binop_rejects_mismatched_operand_types(op_cls):
-    """IRDL's bare operand_def(IntegerType) doesn't bind operand widths
-    together, so a mismatched-width pair only verify_() catches."""
-    blk = Block(arg_types=[IntegerType(32), IntegerType(16)])
-    a, b = blk.args
-    op = op_cls(operands=[a, b], result_types=[IntegerType(32)])
-    with pytest.raises(ValueError, match="same integer type"):
-        op.verify()
-
-
-@pytest.mark.parametrize("op_cls", [HCPow, HCMax, HCMin])
-def test_same_type_scalar_binop_rejects_mismatched_result_type(op_cls):
-    """Operands match each other but the result type differs."""
-    a, b = const_i32(2), const_i32(3)
-    op = op_cls(operands=[a.result, b.result], result_types=[IntegerType(16)])
-    with pytest.raises(ValueError, match="same integer type"):
+def test_relu_rejects_result_type_mismatch():
+    x = const_i32(5)
+    op = HCRelu(operands=[x.result], result_types=[IntegerType(16)])
+    with pytest.raises(ValueError, match="result type must be i32"):
         op.verify()
 
 

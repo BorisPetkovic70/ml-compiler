@@ -1,12 +1,15 @@
-"""The `hc` dialect: ONNX-shaped integer ops, one family for scalars and one
-for tensors (`*_tensor`, `hc.matmul`). See docs/DESIGN.md Sections 1-2.
+"""The `hc` dialect: ONNX-shaped integer ops. See docs/DESIGN.md Sections 1-2.
+
+`hc.add/sub/mul/max/min/pow/relu` are element-wise. An operand is an integer
+or a tensor of rank >= 1, and the binary ops broadcast their operands with
+NumPy's rules (`broadcast_shape`). The result is an integer when every
+operand is, else a tensor. `hc.add_tensor/sub_tensor/mul_tensor/relu_tensor`
+are the same ops with a tensor result only. `hc.matmul` accepts rank 2, or
+rank 3 with a leading batch dim.
 
 `TensorInt` constrains only the element type. Every rule relating the types
 or shapes of an op's operands and result is enforced by that op's
-`verify_()`, which raises `ValueError`. Element-wise tensor ops accept any
-rank >= 1; `hc.matmul` accepts rank 2, or rank 3 with a leading batch dim.
-The binary element-wise tensor ops broadcast their operands with NumPy's
-rules (`broadcast_shape`), and either operand may be a scalar.
+`verify_()`, which raises `ValueError`.
 
 An op belongs to the dialect only once it is listed in the `HiCompiler` tuple
 at the bottom of this file (checklist: docs/HOW_TO_ADD_AN_OP.md).
@@ -22,102 +25,13 @@ from xdsl.irdl import (
 from xdsl.dialects.builtin import IntegerType, TensorType
 
 # -----------------------------
-# Operations
-# -----------------------------
-
-
-def _verify_bin_same_int_type(op: IRDLOperation):
-    """Requires lhs, rhs, and res to have the identical integer type."""
-    if op.lhs.type != op.rhs.type or op.res.type != op.lhs.type:
-        raise ValueError(
-            f"{op.name}: operands and result must have the exact same integer type, "
-            f"got lhs={op.lhs.type}, rhs={op.rhs.type}, res={op.res.type}"
-        )
-
-@irdl_op_definition
-class HCAdd(IRDLOperation):
-    name = "hc.add"
-
-    # Two i32 operands
-    lhs = operand_def(IntegerType)
-    rhs = operand_def(IntegerType)
-
-    # One i32 result
-    res = result_def(IntegerType)
-
-    def verify_(self):
-        _verify_bin_same_int_type(self)
-
-@irdl_op_definition
-class HCMul(IRDLOperation):
-    name = "hc.mul"
-    lhs = operand_def(IntegerType)
-    rhs = operand_def(IntegerType)
-    res = result_def(IntegerType)
-
-    def verify_(self):
-        _verify_bin_same_int_type(self)
-
-
-@irdl_op_definition
-class HCSub(IRDLOperation):
-    name = "hc.sub"
-    lhs = operand_def(IntegerType)
-    rhs = operand_def(IntegerType)
-    res = result_def(IntegerType)
-
-    def verify_(self):
-        _verify_bin_same_int_type(self)
-
-@irdl_op_definition
-class HCRelu(IRDLOperation):
-    name = "hc.relu"
-    x = operand_def(IntegerType)
-    res = result_def(IntegerType)
-
-    def verify_(self):
-        if self.res.type != self.x.type:
-            raise ValueError(f"hc.relu: result type must match operand type")
-
-@irdl_op_definition
-class HCPow(IRDLOperation):
-    """base ** exp, defined for exp >= 0 (the lowering yields 1 for exp < 0)."""
-    name = "hc.pow"
-    base = operand_def(IntegerType)
-    exp  = operand_def(IntegerType)
-    res  = result_def(IntegerType)
-
-    def verify_(self):
-        if self.base.type != self.exp.type or self.res.type != self.base.type:
-            raise ValueError("hc.pow: base, exp, and res must have same integer type")
-
-@irdl_op_definition
-class HCMax(IRDLOperation):
-    name = "hc.max"
-    lhs = operand_def(IntegerType)
-    rhs = operand_def(IntegerType)
-    res = result_def(IntegerType)
-
-    def verify_(self):
-        if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
-            raise ValueError("hc.max: operands and result must have the same integer type")
-
-@irdl_op_definition
-class HCMin(IRDLOperation):
-    name = "hc.min"
-    lhs = operand_def(IntegerType)
-    rhs = operand_def(IntegerType)
-    res = result_def(IntegerType)
-
-    def verify_(self):
-        if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
-            raise ValueError("hc.min: operands and result must have the same integer type")
-
-# -----------------------------
-# Tensor operations
+# Types and shapes
 # -----------------------------
 # "Tensor of integers" type constraint (any element width; rank checked in verify_)
 TensorInt = TensorType.constr(element_type=IntegerType)
+
+# A value of an element-wise op: a scalar, or a tensor of integers.
+ScalarOrTensorInt = base(IntegerType) | TensorInt
 
 
 def _dim(int_attr) -> int:
@@ -150,6 +64,121 @@ def broadcast_shape(a: list[int], b: list[int]) -> list[int]:
     return shape
 
 
+# -----------------------------
+# Element-wise operations
+# -----------------------------
+def _verify_elementwise(op: IRDLOperation):
+    """Requires each operand to be an integer or a tensor of rank >= 1, all
+    of one element type. The result must be that integer type when every
+    operand is a scalar, else a tensor of the operands' broadcast shape."""
+    types = [v.type for v in op.operands]
+    for t in types:
+        if isinstance(t, TensorType) and len(t.shape) < 1:
+            raise ValueError(f"{op.name}: a tensor operand must have rank >= 1, got {t}")
+
+    elem_types = [t.element_type if isinstance(t, TensorType) else t for t in types]
+    elem_t = elem_types[0]
+    if any(t != elem_t for t in elem_types):
+        raise ValueError(
+            f"{op.name}: operands must share the same element type, got "
+            + ", ".join(str(t) for t in types)
+        )
+
+    shape = []
+    for t in types:
+        shape = broadcast_shape(shape, shape_of(t))
+    expected = TensorType(elem_t, shape) if shape else elem_t
+    res_t = op.results[0].type
+    if res_t != expected:
+        raise ValueError(f"{op.name}: result type must be {expected}, got {res_t}")
+
+
+@irdl_op_definition
+class HCAdd(IRDLOperation):
+    """lhs + rhs."""
+    name = "hc.add"
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+@irdl_op_definition
+class HCMul(IRDLOperation):
+    """lhs * rhs."""
+    name = "hc.mul"
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+@irdl_op_definition
+class HCSub(IRDLOperation):
+    """lhs - rhs."""
+    name = "hc.sub"
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+@irdl_op_definition
+class HCRelu(IRDLOperation):
+    """max(x, 0)."""
+    name = "hc.relu"
+    x = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+@irdl_op_definition
+class HCPow(IRDLOperation):
+    """base ** exp, defined for exp >= 0 (the lowering yields 1 for exp < 0)."""
+    name = "hc.pow"
+    base = operand_def(ScalarOrTensorInt)
+    exp = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+@irdl_op_definition
+class HCMax(IRDLOperation):
+    """max(lhs, rhs)."""
+    name = "hc.max"
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+@irdl_op_definition
+class HCMin(IRDLOperation):
+    """min(lhs, rhs)."""
+    name = "hc.min"
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
+    res = result_def(ScalarOrTensorInt)
+
+    def verify_(self):
+        _verify_elementwise(self)
+
+
+# -----------------------------
+# Matmul
+# -----------------------------
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
     """(MxK) @ (KxN) -> (MxN), or batched (BxMxK) @ (BxKxN) -> (BxMxN)."""
@@ -203,10 +232,9 @@ class HCMatmul(IRDLOperation):
             )
 
 
-# An operand of a broadcasting op: a scalar, or a tensor of integers.
-ScalarOrTensorInt = base(IntegerType) | TensorInt
-
-
+# -----------------------------
+# Element-wise operations with a tensor result only
+# -----------------------------
 def _verify_broadcast_binop(op: IRDLOperation):
     """Requires each operand to be an integer or a tensor of rank >= 1, at
     least one of them a tensor, and res to be a tensor of the operands'
@@ -291,8 +319,8 @@ class HCReluTensor(IRDLOperation):
 HiCompiler = Dialect(
     "hc",
     (
-        HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # scalar ops
-        HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor ops
+        HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # element-wise ops
+        HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor-only ops
     ),
     (),  # attrs
 )

@@ -11,9 +11,9 @@ Each node picks its hc op variant (scalar or `*_tensor`) from the types of
 the operands it receives. `Add`, `Sub` and `Mul` take the tensor variant when
 either operand is a tensor; its result type is the shape the operands
 broadcast to (`broadcast_shape`), so the other operand may be a scalar, have
-a lower rank, or have dims of size 1. The op is verified as it is built, so
-operands that don't fit (for example a tensor given to `Pow`) are rejected
-with the node's name.
+a lower rank, or have dims of size 1. `Pow`, `Max` and `Min` have one op each,
+whose result type follows the same rule. The op is verified as it is built,
+so operands that don't fit are rejected with the node's name.
 """
 import onnx
 from xdsl.dialects import func, arith, builtin
@@ -91,11 +91,10 @@ def import_onnx_to_hc_module(
     with one block argument per graph input and a single result.
 
     Raises NotImplementedError for an unsupported op_type, element type, rank
-    or dim, or operand types the node's hc op rejects (for example a tensor
-    given to Pow); ValueError for operand shapes that don't broadcast, a model
-    without exactly one output or a `Constant` node without a `value`
-    attribute, and KeyError when a node reads a value that is not yet
-    defined.
+    or dim, or operand types the node's hc op rejects; ValueError for operand
+    shapes that don't broadcast, a model without exactly one output or a
+    `Constant` node without a `value` attribute, and KeyError when a node
+    reads a value that is not yet defined.
     """
     model = onnx.load(onnx_path)
     graph = model.graph
@@ -156,15 +155,15 @@ def import_onnx_to_hc_module(
             env[node.output[0]] = hc_op.results[0]
 
         def broadcast_type(a, b):
-            """Returns the tensor type `a` and `b` broadcast to, naming this
-            node if their shapes don't fit."""
+            """Returns the type `a` and `b` broadcast to (`i32` for two
+            scalars), naming this node if their shapes don't fit."""
             try:
                 shape = broadcast_shape(shape_of(a.type), shape_of(b.type))
             except ValueError as e:
                 raise ValueError(
                     f"ONNX {node.op_type} node {node.name or node.output[0]!r}: {e}"
                 ) from e
-            return builtin.TensorType(i32, shape)
+            return builtin.TensorType(i32, shape) if shape else i32
 
         if node.op_type == "Add":
             a = get(node.input[0])
@@ -220,21 +219,21 @@ def import_onnx_to_hc_module(
         if node.op_type == "Pow":
             a = get(node.input[0])
             b = get(node.input[1])
-            hc_pow = HCPow(operands=[a, b], result_types=[i32])
+            hc_pow = HCPow(operands=[a, b], result_types=[broadcast_type(a, b)])
             emit(hc_pow)
             continue
 
         if node.op_type == "Max":
             a = get(node.input[0])
             b = get(node.input[1])
-            hc_max = HCMax(operands=[a, b], result_types=[i32])
+            hc_max = HCMax(operands=[a, b], result_types=[broadcast_type(a, b)])
             emit(hc_max)
             continue
 
         if node.op_type == "Min":
             a = get(node.input[0])
             b = get(node.input[1])
-            hc_min = HCMin(operands=[a, b], result_types=[i32])
+            hc_min = HCMin(operands=[a, b], result_types=[broadcast_type(a, b)])
             emit(hc_min)
             continue
 

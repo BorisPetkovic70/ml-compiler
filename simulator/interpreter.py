@@ -281,17 +281,17 @@ class Interpreter:
 
             if name == "hc.pow":
                 a, b = op.operands
-                self._set(op.results[0], self._get(a) ** self._get(b))
+                self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p ** q))
                 continue
 
             if name == "hc.max":
                 a, b = op.operands
-                self._set(op.results[0], max(self._get(a), self._get(b)))
+                self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), max))
                 continue
 
             if name == "hc.min":
                 a, b = op.operands
-                self._set(op.results[0], min(self._get(a), self._get(b)))
+                self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), min))
                 continue
 
             if name == "hc.matmul":

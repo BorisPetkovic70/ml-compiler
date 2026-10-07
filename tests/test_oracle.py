@@ -78,8 +78,25 @@ def test_broadcast_matches_numpy(a_shape, b_shape):
     }}""", [a.tolist(), b.tolist()], r.tolist())
 
 
+@pytest.mark.parametrize("op,reference", [
+    ("hc.max", np.maximum), ("hc.min", np.minimum), ("hc.pow", np.power),
+])
+def test_max_min_pow_on_tensors_match_numpy(op, reference):
+    """2x3 with 3, so the operands also broadcast. `%b` is never negative:
+    `hc.pow` is defined for an exponent >= 0."""
+    rng = np.random.default_rng(0)
+    a = rng.integers(-5, 6, size=(2, 3))
+    b = rng.integers(0, 4, size=(3,))
+    check_oracle(f"""
+    func.func @f(%a: tensor<2x3xi32>, %b: tensor<3xi32>) -> tensor<2x3xi32> {{
+      %r = "{op}"(%a, %b) : (tensor<2x3xi32>, tensor<3xi32>) -> tensor<2x3xi32>
+      func.return %r : tensor<2x3xi32>
+    }}""", [a.tolist(), b.tolist()], reference(a, b).tolist())
+
+
 @pytest.mark.parametrize("op,ty,x,expected", [
     ("hc.relu", "i32", -3, 0),
+    ("hc.relu", "tensor<2x2xi32>", [[-1, 2], [3, -4]], [[0, 2], [3, 0]]),
     ("hc.relu_tensor", "tensor<2x2xi32>", [[-1, 2], [3, -4]], [[0, 2], [3, 0]]),
 ])
 def test_relu(op, ty, x, expected):

@@ -175,6 +175,27 @@ def test_broadcast_uses_a_scalar_operand_directly():
     """)
 
 
+def test_max_on_tensors_puts_the_scf_if_in_the_loop_body():
+    """The same `arith.cmpi` + `scf.if` as scalar `hc.max`, applied to the
+    two extracted elements."""
+    check_lowering("""
+    func.func @f(%a: tensor<2x3xi32>, %b: tensor<3xi32>) -> tensor<2x3xi32> {
+      %r = "hc.max"(%a, %b) : (tensor<2x3xi32>, tensor<3xi32>) -> tensor<2x3xi32>
+      func.return %r : tensor<2x3xi32>
+    }""", """
+    // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK: scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT: %[[X:.*]] = tensor.extract %a[%[[I]], %[[J]]] : tensor<2x3xi32>
+    // CHECK-NEXT: %[[Y:.*]] = tensor.extract %b[%[[J]]] : tensor<3xi32>
+    // CHECK-NEXT: %[[COND:.*]] = arith.cmpi sgt, %[[X]], %[[Y]] : i32
+    // CHECK-NEXT: %[[Z:.*]] = scf.if %[[COND]] -> (i32)
+    // CHECK-NEXT: scf.yield %[[X]] : i32
+    // CHECK-NEXT: else
+    // CHECK-NEXT: scf.yield %[[Y]] : i32
+    // CHECK: tensor.insert %[[Z]] into %{{.*}}[%[[I]], %[[J]]] : tensor<2x3xi32>
+    """)
+
+
 def test_equal_loop_bounds_share_one_constant():
     """A 2x2 result needs the bound 2 twice; both loops use the same
     constant."""
