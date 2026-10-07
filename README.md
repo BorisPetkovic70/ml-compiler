@@ -7,7 +7,7 @@ IR at every stage and is the test suite's correctness oracle.
 
 **Supported:** ONNX `Add`, `Sub`, `Mul`, `MatMul`, `Relu`, `Pow`, `Max`, `Min`, `Constant`;
 initializers (weights); `int32` only; one model output. Rank-0 values are scalars, values of
-any higher rank tensors (`MatMul` takes rank 2, or rank 3 with one leading batch dim).
+any higher rank tensors (`MatMul` takes rank 2 or more, with equal leading batch dims).
 `Add`/`Sub`/`Mul`/`Pow`/`Max`/`Min` broadcast by NumPy's rules: a tensor with a scalar or with
 another tensor (`[M,N] + [N]`). The loader rejects other element types and symbolic dims.
 

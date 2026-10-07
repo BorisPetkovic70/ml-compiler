@@ -45,7 +45,7 @@ written once and works on scalars and on tensors of any rank.
 
 The type constraint `TensorInt` only fixes the element type. It does not relate the
 shapes of different operands, so every shape rule (a broadcast shape; `MxK · KxN → MxN`; a
-matching batch dim) is enforced in a hand-written `verify_()`. The element-wise ops share one,
+matching batch dims) is enforced in a hand-written `verify_()`. The element-wise ops share one,
 `_verify_elementwise`: the result is an `i32` when every operand is, else a tensor of the
 operands' broadcast shape.
 
@@ -54,8 +54,9 @@ have:
 
 - element-wise: one loop per dim, for any rank >= 1; a map with no reduction. `_build_nest`
   builds the loops and the kernel is the body.
-- `hc.matmul`: `i, j, k` loops, where `k` is the reduction. Rank 3 adds one outer batch loop,
-  whose induction variable is prepended to every index.
+- `hc.matmul`: a nest that fills the result with zeros, then `i, j, k` loops whose body adds
+  `A[i,k] * B[k,j]` to `C[i,j]`; `k` is the reduction. Each leading batch dim adds one outer
+  loop, whose induction variable is prepended to every index.
 
 **Broadcasting.** The binary element-wise ops follow NumPy's rules: the operand shapes are
 aligned at the last dim, and each pair of dims must be equal or one of them 1. An operand may
@@ -94,24 +95,34 @@ Lowered `hc.matmul` (value semantics), simplified:
 
 ```mlir
 %empty = tensor.empty() : tensor<4x4xi32>
-%C = scf.for %i = %c0 to %c4 step %c1 iter_args(%Ci = %empty) -> (tensor<4x4xi32>) {
+%zeroed = scf.for %i = %c0 to %c4 step %c1 iter_args(%Zi = %empty) -> (tensor<4x4xi32>) {
+  // %j loop: tensor.insert %c0_i32 into %Zij[%i, %j]
+}
+%C = scf.for %i = %c0 to %c4 step %c1 iter_args(%Ci = %zeroed) -> (tensor<4x4xi32>) {
   %Cj = scf.for %j = %c0 to %c4 step %c1 iter_args(%Cij = %Ci) -> (tensor<4x4xi32>) {
-    %sum = scf.for %k = %c0 to %c4 step %c1 iter_args(%acc = %c0_i32) -> (i32) {
+    %Ck = scf.for %k = %c0 to %c4 step %c1 iter_args(%Cijk = %Cij) -> (tensor<4x4xi32>) {
+      %c = tensor.extract %Cijk[%i, %j] : tensor<4x4xi32>
       %a = tensor.extract %A[%i, %k] : tensor<4x4xi32>
       %b = tensor.extract %B[%k, %j] : tensor<4x4xi32>
       %p = arith.muli %a, %b : i32
-      %s = arith.addi %acc, %p : i32
-      scf.yield %s : i32
+      %s = arith.addi %c, %p : i32
+      %next = tensor.insert %s into %Cijk[%i, %j]
+      scf.yield %next : tensor<4x4xi32>
     }
-    %next = tensor.insert %sum into %Cij[%i, %j]
-    scf.yield %next : tensor<4x4xi32>
+    scf.yield %Ck : tensor<4x4xi32>
   }
   scf.yield %Cj : tensor<4x4xi32>
 }
 ```
 
-The result starts as `tensor.empty`: a tensor with a shape but unspecified contents. The nest
-writes every element and reads none, so no initial value is needed.
+The result starts as `tensor.empty`: a tensor with a shape but unspecified contents. An
+element-wise nest writes every element and reads none, so it needs nothing more. The matmul
+nest adds to `C[i, j]`, so a first nest writes a 0 to every element.
+
+The sum lives in the tensor, not in a scalar carried by the `k` loop. That makes the nest
+**perfect**: each loop body holds only the next loop, and the innermost body is a single
+`C[i, j] += A[i, k] * B[k, j]`. No loop depends on being the innermost one, which is the form
+a loop transformation needs to reorder them.
 
 After bufferization (memory semantics):
 
@@ -119,14 +130,26 @@ After bufferization (memory semantics):
 %C = memref.alloc() : memref<4x4xi32>
 scf.for %i = %c0 to %c4 step %c1 {
   scf.for %j = %c0 to %c4 step %c1 {
-    %sum = scf.for %k ... iter_args(%acc = %c0_i32) -> (i32) { ... memref.load ... }
-    memref.store %sum, %C[%i, %j]
+    memref.store %c0_i32, %C[%i, %j]
+  }
+}
+scf.for %i = %c0 to %c4 step %c1 {
+  scf.for %j = %c0 to %c4 step %c1 {
+    scf.for %k = %c0 to %c4 step %c1 {
+      %c = memref.load %C[%i, %j]
+      %a = memref.load %A[%i, %k]
+      %b = memref.load %B[%k, %j]
+      %p = arith.muli %a, %b : i32
+      %s = arith.addi %c, %p : i32
+      memref.store %s, %C[%i, %j]
+    }
   }
 }
 ```
 
-The `i`/`j` loops no longer carry anything: every store hits the same buffer. The `k` loop still
-carries its `i32` accumulator, because that is a register-level reduction, not memory.
+No loop carries anything: every load and store hits the same buffer. The body reads
+`C[i, j]` before it writes it, and nothing needs the old value afterwards, so the store goes
+in place.
 
 Replacing a copying insert with an in-place store is only correct if nobody still needs the old
 tensor value. §4 covers how the pass ensures this.
@@ -279,8 +302,8 @@ Each limit below exists because no current workload needs it, not by accident.
 
 - **`i32` only.** The loader rejects any ONNX element type other than `INT32`.
 - **Shapes:** every dim must be a known positive size; the loader rejects symbolic dims. The
-  element-wise ops take any rank. `hc.matmul` takes rank 2, or rank 3 with one leading batch
-  dim.
+  element-wise ops take any rank. `hc.matmul` takes any rank >= 2; the dims before the last
+  two are batch dims.
 - **`hc.matmul` does not broadcast.** The element-wise ops do (§2), so a bias add
   `[M,N] + [N]` works; `hc.matmul` needs equal batch dims.
 - **One function, one block, one output.** The loader, bufferization and interpreter all

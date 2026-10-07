@@ -18,14 +18,15 @@ separate scalar and tensor classes: give it `ScalarOrTensorInt` operands and res
 ```python
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
-    """(MxK) * (KxN) -> (MxN), or batched (BxMxK) * (BxKxN) -> (BxMxN)"""
+    """(MxK) @ (KxN) -> (MxN) on the last two dims. Any leading batch dims
+    are the same on lhs, rhs and res: (...xMxK) @ (...xKxN) -> (...xMxN)."""
     name = "hc.matmul"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        ...  # rank-2-or-3 check, same-rank check, element-type agreement, MxK · KxN -> MxN
+        ...  # rank >= 2, same rank, element-type agreement, equal batch dims, MxK · KxN -> MxN
 ```
 
 **Register it in the `HiCompiler` tuple** at the bottom of the file — an op that isn't
@@ -52,8 +53,9 @@ Add a branch in `import_onnx_to_hc_module`'s node loop that recognizes the relev
 if node.op_type == "MatMul":
     a = get(node.input[0])
     b = get(node.input[1])
-    a_dims = [_dim_as_int(d) for d in a.type.shape]
-    b_dims = [_dim_as_int(d) for d in b.type.shape]
+    a_dims, b_dims = shape_of(a.type), shape_of(b.type)
+    if len(a_dims) < 2 or len(b_dims) < 2:
+        raise NotImplementedError(...)  # names the node
     batch, m = a_dims[:-2], a_dims[-2]
     n = b_dims[-1]
     res_ty = builtin.TensorType(i32, batch + [m, n])
@@ -100,7 +102,7 @@ safe_erase=True)` at the end of the method then swaps the op for the new ones.
 Add a branch in `run_block` matching the op's name (for evaluating it directly, before
 lowering) — and, if the lowering introduces operation kinds the interpreter doesn't already
 handle, add support for those too. `hc.matmul`'s addition, for example, required both a native
-`hc.matmul` branch (the reference `_matmul`/`_batched_matmul` helpers, deliberately *not*
+`hc.matmul` branch (the reference `_matmul` helper, deliberately *not*
 derived from the lowering, so the two can't share a bug) and tensor support in general (`tensor.extract`/`tensor.insert`,
 bounds-checked).
 
