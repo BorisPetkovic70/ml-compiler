@@ -32,19 +32,27 @@ func.func @matmul(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
   %m = arith.constant 2 : index
   %n = arith.constant 4 : index
   %kd = arith.constant 3 : index
+  %zero = arith.constant 0 : i32
   %init = tensor.empty() : tensor<2x4xi32>
-  %r = scf.for %i = %c0 to %m step %c1 iter_args(%ti = %init) -> (tensor<2x4xi32>) {
+  %zeroed = scf.for %fi = %c0 to %m step %c1 iter_args(%zi = %init) -> (tensor<2x4xi32>) {
+    %zr = scf.for %fj = %c0 to %n step %c1 iter_args(%zj = %zi) -> (tensor<2x4xi32>) {
+      %z = tensor.insert %zero into %zj[%fi, %fj] : tensor<2x4xi32>
+      scf.yield %z : tensor<2x4xi32>
+    }
+    scf.yield %zr : tensor<2x4xi32>
+  }
+  %r = scf.for %i = %c0 to %m step %c1 iter_args(%ti = %zeroed) -> (tensor<2x4xi32>) {
     %rj = scf.for %j = %c0 to %n step %c1 iter_args(%tj = %ti) -> (tensor<2x4xi32>) {
-      %zero = arith.constant 0 : i32
-      %sum = scf.for %k = %c0 to %kd step %c1 iter_args(%acc = %zero) -> (i32) {
+      %rk = scf.for %k = %c0 to %kd step %c1 iter_args(%tk = %tj) -> (tensor<2x4xi32>) {
+        %c = tensor.extract %tk[%i, %j] : tensor<2x4xi32>
         %x = tensor.extract %a[%i, %k] : tensor<2x3xi32>
         %y = tensor.extract %b[%k, %j] : tensor<3x4xi32>
         %p = arith.muli %x, %y : i32
-        %next = arith.addi %acc, %p : i32
-        scf.yield %next : i32
+        %s = arith.addi %c, %p : i32
+        %t = tensor.insert %s into %tk[%i, %j] : tensor<2x4xi32>
+        scf.yield %t : tensor<2x4xi32>
       }
-      %t = tensor.insert %sum into %tj[%i, %j] : tensor<2x4xi32>
-      scf.yield %t : tensor<2x4xi32>
+      scf.yield %rk : tensor<2x4xi32>
     }
     scf.yield %rj : tensor<2x4xi32>
   }
@@ -52,34 +60,40 @@ func.func @matmul(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
 }"""
 
 
-def test_matmul_result_becomes_an_unfilled_buffer():
+def test_matmul_result_becomes_a_zero_filled_buffer():
     """Tensor arguments and results become memrefs. The `tensor.empty` result
-    becomes a bare `memref.alloc`: the matmul nest follows it directly, with
-    no fill loop. The buffer is returned, so it is not deallocated."""
+    becomes a bare `memref.alloc`, and the fill nest stores a 0 into each of
+    its elements. The buffer is returned, so it is not deallocated."""
     check_bufferization(MATMUL, """
     // CHECK: func.func @matmul(%{{.*}}: memref<2x3xi32>, %{{.*}}: memref<3x4xi32>) -> memref<2x4xi32>
     // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x4xi32>
-    // CHECK-NEXT: scf.for %{{.*}} = %c0 to %m step %c1 {
+    // CHECK-NEXT: scf.for %[[I:.*]] = %c0 to %m step %c1 {
+    // CHECK-NEXT: scf.for %[[J:.*]] = %c0 to %n step %c1 {
+    // CHECK-NEXT: memref.store %zero, %[[BUF]][%[[I]], %[[J]]] : memref<2x4xi32>
     // CHECK-NOT: memref.dealloc
     // CHECK: func.return %[[BUF]] : memref<2x4xi32>
     """)
 
 
 def test_matmul_nest_loads_and_stores_in_place():
-    """Extracts become loads and the insert becomes a store into the result
-    buffer. The i and j loops no longer carry the tensor (no iter_args),
-    while the k loop keeps its i32 accumulator."""
+    """Extracts become loads and the insert becomes a store. The nest reads
+    C[i, j] and writes it back to the same buffer the fill nest wrote, with
+    no copy. No loop carries the tensor any more (no iter_args), and each
+    body holds only the next loop."""
     check_bufferization(MATMUL, """
     // CHECK: func.func @matmul(%[[A:.*]]: memref<2x3xi32>, %[[B:.*]]: memref<3x4xi32>)
     // CHECK: %[[BUF:.*]] = memref.alloc() : memref<2x4xi32>
+    // CHECK-NOT: memref.alloc
+    // CHECK: memref.store %zero
     // CHECK: scf.for %[[I:.*]] = %c0 to %m step %c1 {
     // CHECK-NEXT: scf.for %[[J:.*]] = %c0 to %n step %c1 {
-    // CHECK: %[[SUM:.*]] = scf.for %[[K:.*]] = %c0 to %kd step %c1 iter_args(%[[ACC:.*]] = %zero) -> (i32) {
+    // CHECK-NEXT: scf.for %[[K:.*]] = %c0 to %kd step %c1 {
+    // CHECK-NEXT: %[[C:.*]] = memref.load %[[BUF]][%[[I]], %[[J]]] : memref<2x4xi32>
     // CHECK-NEXT: %[[X:.*]] = memref.load %[[A]][%[[I]], %[[K]]] : memref<2x3xi32>
     // CHECK-NEXT: %[[Y:.*]] = memref.load %[[B]][%[[K]], %[[J]]] : memref<3x4xi32>
-    // CHECK: scf.yield
-    // CHECK-NEXT: }
-    // CHECK-NEXT: memref.store %[[SUM]], %[[BUF]][%[[I]], %[[J]]] : memref<2x4xi32>
+    // CHECK-NEXT: %[[P:.*]] = arith.muli %[[X]], %[[Y]] : i32
+    // CHECK-NEXT: %[[S:.*]] = arith.addi %[[C]], %[[P]] : i32
+    // CHECK-NEXT: memref.store %[[S]], %[[BUF]][%[[I]], %[[J]]] : memref<2x4xi32>
     // CHECK: func.return %[[BUF]] : memref<2x4xi32>
     """)
 

@@ -11,8 +11,9 @@ An op with a scalar result lowers to its kernel alone. An op with a tensor
 result lowers to an `scf.for` nest over `tensor.extract`/`tensor.insert`
 with the kernel in the innermost body (docs/DESIGN.md Section 3). The binary
 ones broadcast: each operand is indexed by the result's induction variables,
-as far as its own shape reaches (`_broadcast_extract`). `hc.matmul` has its
-own nest (`_build_matmul_nest`).
+as far as its own shape reaches (`_broadcast_extract`). `hc.matmul` lowers to
+two nests (`_build_matmul_nest`): one fills the result with zeros, the other
+adds `A[i, k] * B[k, j]` to `C[i, j]`.
 
 `LowerHCPattern` raises NotImplementedError for an `hc` op that has neither
 a kernel nor its own nest.
@@ -50,13 +51,14 @@ def _as_int(x) -> int:
 # -----------------------------------------------------------------------------
 #  Loop-nest builder
 # -----------------------------------------------------------------------------
-def _build_nest(shape: list[int], res_type: builtin.TensorType, body_fn):
+def _build_nest(shape: list[int], res_type: builtin.TensorType, body_fn, init=None):
     """Builds one `scf.for` per entry of `shape`, outermost first, and returns
     (new_ops, result_value).
 
     Every loop runs from 0 to its dim with step 1 and carries a tensor of
-    `res_type` in iter_args. The outermost loop starts from a `tensor.empty`,
-    and each inner loop from the tensor its parent carries.
+    `res_type` in iter_args. The outermost loop starts from `init`, or from a
+    new `tensor.empty` when `init` is None, and each inner loop from the
+    tensor its parent carries.
 
     `body_fn(ivs, carried)` builds the innermost body: `ivs` are the induction
     variables, outermost first, and `carried` is the tensor the innermost loop
@@ -65,8 +67,12 @@ def _build_nest(shape: list[int], res_type: builtin.TensorType, body_fn):
     idx_ty = builtin.IndexType()
     consts = _index_constants(0, 1, *shape)
     c0, c1 = consts[0], consts[1]
-    # Its contents are unspecified: the nest is expected to write every element.
-    empty_res = tensor.EmptyOp([], res_type)
+    setup_ops = list(consts.values())
+    if init is None:
+        # Its contents are unspecified: the nest is expected to write every element.
+        empty_res = tensor.EmptyOp([], res_type)
+        setup_ops.append(empty_res)
+        init = empty_res.tensor
 
     # Each body block takes (iv, carried tensor). All are created up front so
     # the innermost body can reference every induction variable.
@@ -81,88 +87,49 @@ def _build_nest(shape: list[int], res_type: builtin.TensorType, body_fn):
     for d in reversed(range(len(shape))):
         if loop is not None:
             bodies[d].add_ops([loop, scf.YieldOp(loop.results[0])])
-        init = bodies[d - 1].args[1] if d else empty_res.tensor
-        loop = scf.ForOp(c0.result, consts[shape[d]].result, c1.result, [init], Region(bodies[d]))
+        start = bodies[d - 1].args[1] if d else init
+        loop = scf.ForOp(c0.result, consts[shape[d]].result, c1.result, [start], Region(bodies[d]))
 
-    return [*consts.values(), empty_res, loop], loop.results[0]
+    return [*setup_ops, loop], loop.results[0]
 
 
 # -----------------------------------------------------------------------------
 #  Matmul lowering helper
 # -----------------------------------------------------------------------------
 def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
-    """Builds the loop nest computing `lhs @ rhs` into a new tensor of
+    """Builds the two loop nests computing `lhs @ rhs` into a new tensor of
     `res_type`, and returns (new_ops, result_value).
 
-    The i and j loops (and the outer batch loop, for rank 3) carry the result
-    tensor in iter_args. The innermost k loop carries a scalar accumulator.
-    For rank 3, the batch induction variable is prepended to every
-    extract/insert index.
+    The first nest writes 0 to every element of the result. The second has
+    one loop per dim of the result and an innermost k loop, and its body is
+    C[i, j] = C[i, j] + A[i, k] * B[k, j]. Every loop carries the result
+    tensor and the body holds no other loop, so the nest is perfect.
+
+    The induction variables of any leading batch dims come before i, j and k
+    and are prepended to every extract/insert index.
     """
     res_dims = [_as_int(d) for d in res_type.shape]
-    batched = len(res_dims) == 3
-    batch_dim, m, n = (res_dims if batched else (None, *res_dims))
     k_dim = _as_int(list(lhs.type.shape)[-1])
     elem_ty = res_type.element_type
-    idx_ty = builtin.IndexType()
 
-    # loop-control constants must be index
-    bounds = (m, n, k_dim, batch_dim) if batched else (m, n, k_dim)
-    consts = _index_constants(0, 1, *bounds)
-    c0, c1, c_m, c_n, c_k = (consts[v] for v in (0, 1, m, n, k_dim))
-    # Result tensor (full res_type, batch dim included). Its contents are
-    # unspecified: the nest writes every element and reads none.
-    empty_res = tensor.EmptyOp([], res_type)
-    setup_ops = [*consts.values(), empty_res]
+    def fill_body(ivs, carried):
+        zero = arith.ConstantOp.from_int_and_width(0, elem_ty)
+        inserted = tensor.InsertOp(zero.result, carried, ivs)
+        return [zero, inserted], inserted.result
 
-    # The batch loop, when present, is the outermost level: it carries the
-    # full result tensor through iter_args exactly like the i loop does below,
-    # and its induction variable is prepended to every extract/insert index.
-    prefix = []
-    i_init = empty_res.tensor
-    batch_body = None
-    if batched:
-        c_bdim = consts[batch_dim]
-        batch_body = Block(arg_types=[idx_ty, res_type])
-        bi, c_bi = batch_body.args
-        prefix = [bi]
-        i_init = c_bi
+    def matmul_body(ivs, carried):
+        *batch, i, j, k = ivs
+        c_val = tensor.ExtractOp(carried, [*batch, i, j], elem_ty)
+        a_val = tensor.ExtractOp(lhs, [*batch, i, k], elem_ty)
+        b_val = tensor.ExtractOp(rhs, [*batch, k, j], elem_ty)
+        prod = arith.MuliOp(a_val.result, b_val.result)
+        new_c = arith.AddiOp(c_val.result, prod.result)
+        inserted = tensor.InsertOp(new_c.result, carried, [*batch, i, j])
+        return [c_val, a_val, b_val, prod, new_c, inserted], inserted.result
 
-    # Each loop body block takes (iv, iter_arg); create all three up front so the
-    # inner bodies can reference i and j.
-    i_body = Block(arg_types=[idx_ty, res_type])
-    j_body = Block(arg_types=[idx_ty, res_type])
-    k_body = Block(arg_types=[idx_ty, elem_ty])
-    i, c_i = i_body.args
-    j, c_ij = j_body.args
-    k, acc = k_body.args
-
-    # k loop: acc += A[i,k] * B[k,j] (A[b,i,k] * B[b,k,j] when batched)
-    a_val = tensor.ExtractOp(lhs, [*prefix, i, k], elem_ty)
-    b_val = tensor.ExtractOp(rhs, [*prefix, k, j], elem_ty)
-    prod = arith.MuliOp(a_val.result, b_val.result)
-    new_acc = arith.AddiOp(acc, prod.result)
-    k_body.add_ops([a_val, b_val, prod, new_acc, scf.YieldOp(new_acc.result)])
-
-    # j loop: C[i,j] = <k-loop result>, threading the tensor
-    zero_acc = arith.ConstantOp.from_int_and_width(0, elem_ty)
-    k_loop = scf.ForOp(c0.result, c_k.result, c1.result, [zero_acc.result], Region(k_body))
-    inserted = tensor.InsertOp(k_loop.results[0], c_ij, [*prefix, i, j])
-    j_body.add_ops([zero_acc, k_loop, inserted, scf.YieldOp(inserted.result)])
-
-    # i loop: yields the tensor produced by the j loop
-    j_loop = scf.ForOp(c0.result, c_n.result, c1.result, [c_i], Region(j_body))
-    i_body.add_ops([j_loop, scf.YieldOp(j_loop.results[0])])
-    i_loop = scf.ForOp(c0.result, c_m.result, c1.result, [i_init], Region(i_body))
-
-    if batched:
-        batch_body.add_ops([i_loop, scf.YieldOp(i_loop.results[0])])
-        batch_loop = scf.ForOp(
-            c0.result, c_bdim.result, c1.result, [empty_res.tensor], Region(batch_body)
-        )
-        return [*setup_ops, batch_loop], batch_loop.results[0]
-
-    return [*setup_ops, i_loop], i_loop.results[0]
+    fill_ops, zeroed = _build_nest(res_dims, res_type, fill_body)
+    nest_ops, result = _build_nest([*res_dims, k_dim], res_type, matmul_body, init=zeroed)
+    return [*fill_ops, *nest_ops], result
 
 
 # -----------------------------------------------------------------------------
