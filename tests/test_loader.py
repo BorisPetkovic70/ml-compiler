@@ -1,6 +1,5 @@
-"""ONNX -> hc op mapping: given the declared input shapes (scalar [], vector
-[n], tensor [m, n] or [b, m, n]), each ONNX op_type maps to the right hc op
-variant.
+"""ONNX -> hc op mapping: given the declared input shapes (scalar [], or a
+tensor of rank 1 to 3), each ONNX op_type maps to the right hc op variant.
 """
 import pytest
 
@@ -30,9 +29,9 @@ def _save_one_node_model(tmp_path, op_type, input_specs, output_shape, name="f")
     ("Sub", [], "hc.sub"),
     ("Mul", [], "hc.mul"),
     ("Relu", [], "hc.relu"),
-    ("Add", [4], "hc.add_vec"),
-    ("Sub", [4], "hc.sub_vec"),
-    ("Relu", [4], "hc.relu_vec"),
+    ("Add", [4], "hc.add_tensor"),
+    ("Sub", [4], "hc.sub_tensor"),
+    ("Relu", [4], "hc.relu_tensor"),
     ("Add", [2, 3], "hc.add_tensor"),
     ("Sub", [2, 3], "hc.sub_tensor"),
     ("Relu", [2, 3], "hc.relu_tensor"),
@@ -48,16 +47,18 @@ def test_binop_or_unary_dispatches_by_shape(tmp_path, ctx, op_type, shape, expec
     assert expected_hc_op in entry_op_names(module, "my_func")
 
 
-def test_mul_vecvec_dispatches_to_mul_vec_vec(tmp_path, ctx):
+def test_mul_rank_1_dispatches_to_mul_tensor(tmp_path, ctx):
     path = _save_one_node_model(tmp_path, "Mul", [("a", [4]), ("b", [4])], [4])
     module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
-    assert "hc.mul_vec_vec" in entry_op_names(module, "my_func")
+    assert "hc.mul_tensor" in entry_op_names(module, "my_func")
 
 
-def test_mul_scalar_times_vector_dispatches_to_mul_vec(tmp_path, ctx):
+def test_mul_scalar_times_rank_1_dispatches_to_mul_tensor(tmp_path, ctx):
     path = _save_one_node_model(tmp_path, "Mul", [("a", []), ("b", [4])], [4])
     module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
-    assert "hc.mul_vec" in entry_op_names(module, "my_func")
+    op = find_op(module, "hc.mul_tensor", "my_func")
+    assert [d.data for d in op.results[0].type.shape] == [4]
+    module.verify()
 
 
 def test_mul_tensor_dispatches_to_mul_tensor(tmp_path, ctx):
@@ -69,6 +70,15 @@ def test_mul_tensor_dispatches_to_mul_tensor(tmp_path, ctx):
 def test_add_result_type_is_the_broadcast_shape(tmp_path, ctx):
     """1x3 + 2x3 -> 2x3: the result type is not the first operand's."""
     path = _save_one_node_model(tmp_path, "Add", [("a", [1, 3]), ("b", [2, 3])], [2, 3])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    op = find_op(module, "hc.add_tensor", "my_func")
+    assert [d.data for d in op.results[0].type.shape] == [2, 3]
+    module.verify()
+
+
+def test_bias_add_broadcasts_a_rank_1_operand(tmp_path, ctx):
+    """2x3 + 3: a rank-1 value is a tensor, so it broadcasts along the rows."""
+    path = _save_one_node_model(tmp_path, "Add", [("a", [2, 3]), ("b", [3])], [2, 3])
     module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
     op = find_op(module, "hc.add_tensor", "my_func")
     assert [d.data for d in op.results[0].type.shape] == [2, 3]
@@ -96,9 +106,10 @@ def test_multiple_inputs_all_bound_as_block_args(tmp_path, ctx):
     assert len(fn.function_type.inputs.data) == 2
 
 
-def test_pow_rejects_vector_operand(tmp_path, ctx):
-    path = _save_one_node_model(tmp_path, "Pow", [("a", [4]), ("b", [4])], [4])
-    with pytest.raises(NotImplementedError):
+def test_pow_rejects_tensor_operand(tmp_path, ctx):
+    """`hc.pow` is scalar-only, and the error names the ONNX node."""
+    path = _save_one_node_model(tmp_path, "Pow", [("a", [4]), ("b", [4])], [4], name="p")
+    with pytest.raises(NotImplementedError, match="Pow node 'p'"):
         import_onnx_to_hc_module(ctx, path, fn_name="my_func")
 
 

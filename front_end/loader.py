@@ -1,19 +1,19 @@
 """Imports an ONNX graph as an `hc` module with one `func.func`.
 
-Types come from ONNX shapes: rank 0 -> i32, rank 1 -> VectorType, rank 2 or
-3 -> TensorType. Graph inputs use their declared shape
-(`_type_from_value_info`); initializers and `Constant` nodes use the same rule
-(`_const_op_from_tensor`), so a constant and a runtime input of the same shape
-get the same type. A value that isn't INT32, has rank 4 or more, or has a dim
-without a known positive size is rejected (`_check_value`).
+Types come from ONNX shapes: rank 0 -> i32, rank 1 to 3 -> TensorType. Graph
+inputs use their declared shape (`_type_from_value_info`); initializers and
+`Constant` nodes use the same rule (`_const_op_from_tensor`), so a constant
+and a runtime input of the same shape get the same type. A value that isn't
+INT32, has rank 4 or more, or has a dim without a known positive size is
+rejected (`_check_value`).
 
-Each node picks its hc op variant (scalar, `*_vec`, `*_tensor`) from the types
-of the operands it receives. `Add`, `Sub` and `Mul` take the tensor variant
-when either operand is a tensor; its result type is the shape the operands
-broadcast to (`broadcast_shape`), so the other operand may be a scalar or
-have dims of size 1. The op is verified as it is built, so operands that
-don't fit (for example a tensor with a vector) are rejected with the node's
-name.
+Each node picks its hc op variant (scalar or `*_tensor`) from the types of
+the operands it receives. `Add`, `Sub` and `Mul` take the tensor variant when
+either operand is a tensor; its result type is the shape the operands
+broadcast to (`broadcast_shape`), so the other operand may be a scalar, have
+a lower rank, or have dims of size 1. The op is verified as it is built, so
+operands that don't fit (for example a tensor given to `Pow`) are rejected
+with the node's name.
 """
 import onnx
 from xdsl.dialects import func, arith, builtin
@@ -24,23 +24,12 @@ from xdsl.ir import Region, Block
 from xdsl.utils.exceptions import VerifyException
 
 from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
-from hc_dialect import HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec
 from hc_dialect import HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor
 from hc_dialect import broadcast_shape, shape_of
 
 # --------------------------------------
 #  Helper functions
 # --------------------------------------
-
-def _vec_type_from_shape(shape) -> builtin.VectorType:
-    """Build a VectorType<...xi32> from a list of dimension sizes."""
-    dims = [int(d) for d in shape]
-    try:
-        return builtin.VectorType(dims, i32)
-    except TypeError:
-        # some xdsl versions take (element_type, shape)
-        return builtin.VectorType(i32, dims)
-
 
 def _check_value(name: str, elem_type: int, dims: list) -> None:
     """Raises NotImplementedError unless the ONNX value `name` is INT32 with
@@ -68,29 +57,20 @@ def _type_from_value_info(value_info):
     _check_value(value_info.name, tensor_type.elem_type, dims)
     if not dims:
         return i32
-    if len(dims) in (2, 3):
-        return builtin.TensorType(i32, dims)
-    return _vec_type_from_shape(dims)
+    return builtin.TensorType(i32, dims)
 
 
 def _const_op_from_tensor(tensor_proto, name: str) -> arith.ConstantOp:
-    """Builds an `arith.constant` (scalar i32, or dense tensor/vector) from an
-    ONNX TensorProto bound to the value `name`."""
+    """Builds an `arith.constant` (scalar i32, or dense tensor) from an ONNX
+    TensorProto bound to the value `name`."""
     _check_value(name, tensor_proto.data_type, list(tensor_proto.dims))
     arr = onnx.numpy_helper.to_array(tensor_proto)
     if arr.shape == ():
         return arith.ConstantOp.from_int_and_width(int(arr), 32)
-    if len(arr.shape) in (2, 3):
-        ty = builtin.TensorType(i32, list(arr.shape))
-    else:
-        ty = _vec_type_from_shape(arr.shape)
+    ty = builtin.TensorType(i32, list(arr.shape))
     values = [int(v) for v in arr.reshape(-1).tolist()]
     dense = builtin.DenseIntOrFPElementsAttr.from_list(ty, values)
     return arith.ConstantOp(dense)
-
-
-def _is_vec(value) -> bool:
-    return isinstance(value.type, builtin.VectorType)
 
 
 def _is_tensor(value) -> bool:
@@ -111,8 +91,8 @@ def import_onnx_to_hc_module(
     with one block argument per graph input and a single result.
 
     Raises NotImplementedError for an unsupported op_type, element type, rank
-    or dim, a vector operand to Pow/Max/Min, or operand types the node's hc
-    op rejects; ValueError for operand shapes that don't broadcast, a model
+    or dim, or operand types the node's hc op rejects (for example a tensor
+    given to Pow); ValueError for operand shapes that don't broadcast, a model
     without exactly one output or a `Constant` node without a `value`
     attribute, and KeyError when a node reads a value that is not yet
     defined.
@@ -191,8 +171,6 @@ def import_onnx_to_hc_module(
             b = get(node.input[1])
             if _is_tensor(a) or _is_tensor(b):
                 hc_cls, res_ty = HCAddTensor, broadcast_type(a, b)
-            elif _is_vec(a) and _is_vec(b):
-                hc_cls, res_ty = HCAddVec, a.type
             else:
                 hc_cls, res_ty = HCAdd, a.type
             hc = hc_cls(operands=[a, b], result_types=[res_ty])
@@ -204,8 +182,6 @@ def import_onnx_to_hc_module(
             b = get(node.input[1])
             if _is_tensor(a) or _is_tensor(b):
                 hc_cls, res_ty = HCSubTensor, broadcast_type(a, b)
-            elif _is_vec(a) and _is_vec(b):
-                hc_cls, res_ty = HCSubVec, a.type
             else:
                 hc_cls, res_ty = HCSub, a.type
             hc = hc_cls(operands=[a, b], result_types=[res_ty])
@@ -217,12 +193,6 @@ def import_onnx_to_hc_module(
             b = get(node.input[1])
             if _is_tensor(a) or _is_tensor(b):
                 hc = HCMulTensor(operands=[a, b], result_types=[broadcast_type(a, b)])
-            elif _is_vec(a) and _is_vec(b):
-                hc = HCMulVecVec(operands=[a, b], result_types=[a.type])
-            elif _is_vec(a) or _is_vec(b):
-                # hc.mul_vec is scalar * vector: put the vector operand second.
-                scalar, vec = (b, a) if _is_vec(a) else (a, b)
-                hc = HCMulVec(operands=[scalar, vec], result_types=[vec.type])
             else:
                 hc = HCMul(operands=[a, b], result_types=[i32])
             emit(hc)
@@ -242,12 +212,7 @@ def import_onnx_to_hc_module(
 
         if node.op_type == "Relu":
             x = get(node.input[0])
-            if _is_tensor(x):
-                hc_cls = HCReluTensor
-            elif _is_vec(x):
-                hc_cls = HCReluVec
-            else:
-                hc_cls = HCRelu
+            hc_cls = HCReluTensor if _is_tensor(x) else HCRelu
             hc = hc_cls(operands=[x], result_types=[x.type])
             emit(hc)
             continue
@@ -255,8 +220,6 @@ def import_onnx_to_hc_module(
         if node.op_type == "Pow":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_vec(a) or _is_vec(b):
-                raise NotImplementedError("hc.pow has no vector variant yet")
             hc_pow = HCPow(operands=[a, b], result_types=[i32])
             emit(hc_pow)
             continue
@@ -264,8 +227,6 @@ def import_onnx_to_hc_module(
         if node.op_type == "Max":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_vec(a) or _is_vec(b):
-                raise NotImplementedError("hc.max has no vector variant yet")
             hc_max = HCMax(operands=[a, b], result_types=[i32])
             emit(hc_max)
             continue
@@ -273,8 +234,6 @@ def import_onnx_to_hc_module(
         if node.op_type == "Min":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_vec(a) or _is_vec(b):
-                raise NotImplementedError("hc.min has no vector variant yet")
             hc_min = HCMin(operands=[a, b], result_types=[i32])
             emit(hc_min)
             continue

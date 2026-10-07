@@ -113,10 +113,10 @@ def test_scalar_abi_compiles_and_matches_independent_oracle(tmp_path):
     assert _parse_ints(stdout) == [expected]
 
 
-def test_vector_abi_compiles_and_matches_independent_oracle(tmp_path):
-    """Register ABI, vector signature: vectors passed as GCC vector_size values.
-    y = relu((a*x + b) * w), w = [7,2,3,5]; b chosen with a negative lane so relu
-    actually clamps something."""
+def test_rank_1_tensor_abi_compiles_and_matches_independent_oracle(tmp_path):
+    """C-interface ABI with rank-1 memrefs and a by-value scalar in one
+    signature. y = relu((a*x + b) * w), w = [7,2,3,5]; b has a negative
+    element so relu actually clamps something."""
     onnx_path = tmp_path / "vec_affine_relu.onnx"
     build_vec_affine_relu_model(str(onnx_path), n=4)
 
