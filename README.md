@@ -7,8 +7,8 @@ IR at every stage and is the test suite's correctness oracle.
 
 **Supported:** ONNX `Add`, `Sub`, `Mul`, `MatMul`, `Relu`, `Pow`, `Max`, `Min`, `Constant`;
 initializers (weights); `int32` only; one model output. Rank-0 values are scalars, ranks 1-3
-tensors (`MatMul` takes rank 2, or rank 3 with one leading batch dim). `Pow`/`Max`/`Min` are
-scalar-only. `Add`/`Sub`/`Mul` broadcast by NumPy's rules: a tensor with a scalar or with
+tensors (`MatMul` takes rank 2, or rank 3 with one leading batch dim).
+`Add`/`Sub`/`Mul`/`Pow`/`Max`/`Min` broadcast by NumPy's rules: a tensor with a scalar or with
 another tensor (`[M,N] + [N]`). The loader rejects other element types, rank 4+ and symbolic
 dims.
 
@@ -106,7 +106,7 @@ for the same arguments.
 ## Layout
 
 ```
-hc_dialect.py           the hc dialect: scalar and tensor (*_tensor, matmul) ops
+hc_dialect.py           the hc dialect: one op per ONNX op, on scalars and tensors
 hc_main.py              compile driver: ONNX → hc → middle end → .mlir + harness
 hc_interpret.py         interpreter driver: runs a model on given arguments, before and after the middle end
 full_compiler.sh        hc_main.py + hc_interpret.py + back_end/back_end.sh, then compares the two results

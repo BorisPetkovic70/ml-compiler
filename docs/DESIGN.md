@@ -30,30 +30,36 @@ a transform, and the results must match.
 
 ## 2. Scalars and tensors
 
-These are two separate kinds of value, each with its own op family (`hc.add`,
-`hc.add_tensor`, …), because each maps onto hardware differently. Every ONNX value of rank 1
-or more is a tensor:
+These are the two kinds of value, and each maps onto hardware differently. Every ONNX value of
+rank 1 or more is a tensor. One op covers both: `hc.add` takes `i32` or tensor operands, and
+its result type decides how it is lowered:
 
-| Kind | Type | Hardware | Lowering |
+| Result | Type | Hardware | Lowering |
 |---|---|---|---|
-| scalar | `i32` | general register | one `arith` op (`hc.add` → `arith.addi`) |
-| tensor | `tensor<Nxi32>`, `tensor<MxNxi32>`, … | none | an `scf.for` loop nest |
+| scalar | `i32` | general register | the op's kernel (`hc.add` → `arith.addi`) |
+| tensor | `tensor<Nxi32>`, `tensor<MxNxi32>`, … | none | an `scf.for` loop nest with the kernel in its body |
+
+A **kernel** builds the ops that compute one element from scalar values. `_KERNELS` in
+`hc_lowering.py` holds one per element-wise op (`add/sub/mul/max/min/pow/relu`), so an op is
+written once and works on scalars and on tensors of any rank.
 
 The type constraint `TensorInt` only fixes the element type. It does not relate the
-shapes of different operands, so every op with a shape rule (same shape; a broadcast shape;
-`MxK · KxN → MxN`; a matching batch dim) enforces it in a hand-written `verify_()`. Keeping
-families separate keeps each verifier small.
+shapes of different operands, so every shape rule (a broadcast shape; `MxK · KxN → MxN`; a
+matching batch dim) is enforced in a hand-written `verify_()`. The element-wise ops share one,
+`_verify_elementwise`: the result is an `i32` when every operand is, else a tensor of the
+operands' broadcast shape.
 
-The tensor ops are the first whose lowering adds structure the source op didn't have:
+An op with a tensor result is the first whose lowering adds structure the source op didn't
+have:
 
-- elementwise (`add/sub/mul/relu_tensor`): one loop per dim, for any rank >= 1; a map with no
-  reduction. `_build_nest` builds the loops and the op supplies only the body.
+- element-wise: one loop per dim, for any rank >= 1; a map with no reduction. `_build_nest`
+  builds the loops and the kernel is the body.
 - `hc.matmul`: `i, j, k` loops, where `k` is the reduction. Rank 3 adds one outer batch loop,
   whose induction variable is prepended to every index.
 
-**Broadcasting.** `hc.add_tensor`, `hc.sub_tensor` and `hc.mul_tensor` follow NumPy's rules:
-the operand shapes are aligned at the last dim, and each pair of dims must be equal or one of
-them 1. An operand may also be a scalar `i32`. `broadcast_shape(a, b)` in `hc_dialect.py`
+**Broadcasting.** The binary element-wise ops follow NumPy's rules: the operand shapes are
+aligned at the last dim, and each pair of dims must be equal or one of them 1. An operand may
+also be a scalar `i32`. `broadcast_shape(a, b)` in `hc_dialect.py`
 computes the result shape; the verifier and the loader both use it.
 
 The lowering loops over the result's shape and reads each operand as far as its own shape
@@ -68,8 +74,9 @@ used directly. Nothing is copied or expanded:
 ```
 
 `hc.max`/`hc.min` lower to `arith.cmpi` + `scf.if`, not `arith.maxsi`/`minsi`. That follows the
-tutorial in `doc_upload/`, which uses them to introduce structured control flow. The
-interpreter's `scf.if` shortcut (§7) relies on this exact shape.
+tutorial in `doc_upload/`, which uses them to introduce structured control flow. On tensors
+the same `scf.if` sits in the loop body. The interpreter's `scf.if` shortcut (§7) relies on
+this exact shape.
 
 ## 3. Value semantics vs memory semantics
 
@@ -178,7 +185,7 @@ function owns like any other temporary.
 - any other op touches a tensor (for example, an `hc.*` op that was never lowered).
 
 Neither the copies nor the refusals are triggered by IR the current lowering produces,
-including a chained `hc.matmul` → `hc.relu_tensor` and a matmul with a weight. The
+including a chained `hc.matmul` → `hc.relu` and a matmul with a weight. The
 `dense_layer` sample model (`relu(X @ W + B)`) shows all three buffer kinds at once: `X` is an
 input, `W` and `B` are weights, and the matmul and add results are temporaries.
 
@@ -270,14 +277,12 @@ harness's format, and the script fails unless the executable prints the same tex
 
 Each limit below exists because no current workload needs it, not by accident.
 
-- **`i32` only.** The loader rejects any ONNX element type other than `INT32`. The scalar
-  `hc.relu`/`hc.pow` lowerings hardcode `i32` constants.
+- **`i32` only.** The loader rejects any ONNX element type other than `INT32`.
 - **Shapes:** rank 0 (scalar) and ranks 1–3 (tensor), with every dim a known positive size.
   The loader rejects anything else (rank 4+, symbolic dims). `hc.matmul` takes rank 2, or
   rank 3 with one leading batch dim.
-- **Only `add`/`sub`/`mul` broadcast.** The `*_tensor` binary ops broadcast (§2), so a bias
-  add `[M,N] + [N]` works. `hc.pow`/`hc.max`/`hc.min` are scalar-only, and `hc.matmul` needs
-  equal batch dims.
+- **`hc.matmul` does not broadcast.** The element-wise ops do (§2), so a bias add
+  `[M,N] + [N]` works; `hc.matmul` needs equal batch dims.
 - **One function, one block, one output.** The loader, bufferization and interpreter all
   assume this.
 - **No overflow model.** Python ints don't wrap the way `i32` does in hardware.

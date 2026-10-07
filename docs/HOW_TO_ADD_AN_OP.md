@@ -11,7 +11,9 @@ Define the op as an `IRDLOperation` subclass with `@irdl_op_definition`, its ope
 via `operand_def(...)`/`result_def(...)`, and a hand-written `verify_(self)` for any
 cross-operand invariant the type system alone can't express (`TensorInt` doesn't bind
 shapes across operands, so every op with a shape relationship between its operands needs its own
-verifier — see DESIGN.md Section 2):
+verifier — see DESIGN.md Section 2). An element-wise op needs neither a verifier of its own nor
+separate scalar and tensor classes: give it `ScalarOrTensorInt` operands and result, and call
+`_verify_elementwise(self)` from `verify_`, as `HCAdd` does.
 
 ```python
 @irdl_op_definition
@@ -34,8 +36,8 @@ above:
 HiCompiler = Dialect(
     "hc",
     (
-        HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,      # scalar ops
-        HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor ops
+        HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # element-wise ops
+        HCMatmul,
     ),
     (),  # attrs
 )
@@ -56,45 +58,42 @@ if node.op_type == "MatMul":
     n = b_dims[-1]
     res_ty = builtin.TensorType(i32, batch + [m, n])
     hc = HCMatmul(operands=[a, b], result_types=[res_ty])
-    ops.append(hc)
-    env[node.output[0]] = hc.results[0]
+    emit(hc)
     continue
 ```
 
-If the op has scalar and tensor variants (like `Add`/`Mul`), dispatch on `_is_tensor(...)` for
-each operand, following the existing `Add`/`Sub`/`Mul` branches. A
-broadcasting tensor op takes its result type from `broadcast_type(a, b)`.
+`emit` verifies the op and binds its result to the node's output. A binary element-wise op
+needs no branch: add a row to `_BINARY_OPS`. Its result type comes from `broadcast_type(a, b)`,
+which is `i32` for two scalars and a tensor otherwise.
 
 ## 3. Lowering (`middle_end/hc_lowering.py`)
 
-**This is the step most likely to fail silently if skipped.** `LowerHCPattern.match_and_rewrite`
-opens with a dispatch guard:
+`LowerHCPattern.match_and_rewrite` lowers `hc.matmul` with its own loop nest and every other
+`hc` op through the `_KERNELS` table. An `hc` op with neither raises `NotImplementedError`.
+
+**An element-wise op is a kernel plus a table row.** A kernel takes the op's operands as scalar
+values and returns `(ops, result_value)` for one element:
 
 ```python
-if op.name not in (
-    "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
-    "hc.matmul", "hc.add_tensor", "hc.sub_tensor", "hc.mul_tensor", "hc.relu_tensor",
-):
-    return
+def _add(a, b):
+    add = arith.AddiOp(a, b)
+    return [add], add.result
+
+_KERNELS = {
+    "hc.add": _add,
+    ...
+}
 ```
 
-**An op name left out of this tuple is not an error — the pattern simply returns without
-touching it, and the unlowered `hc.*` op survives silently into whatever comes next in the
-pipeline**, surfacing as a confusing failure far from the actual cause (usually inside
-bufferization or the backend, which don't recognize `hc.*` ops at all). A name that *is* in the
-tuple but has no branch behaves the same way — the method falls off the end and returns — so
-adding the name first is not a guard by itself. The guard is `check_lowering()` in
-`test_lowering.py`, which checks that no `hc.` op survives lowering; give the new op a test
-there (step 5).
+That is the whole lowering. When the op's result is a scalar, the kernel's ops replace it. When
+the result is a tensor, `_build_tensor_elementwise_nest` builds one loop per dim with
+`_build_nest`, reads each operand with broadcasting, and runs the kernel in the innermost body.
+A kernel may hold control flow of its own: `hc.max` is an `scf.if` and `hc.pow` an `scf.for`.
 
-Then add the branch itself, building the replacement operation(s) and calling
-`rewriter.replace(op, new_ops=[...], new_results=[...], safe_erase=True)` (not the deprecated
-`replace_op`). If the lowering is large enough that inlining it would clutter the dispatch
-method (`hc.matmul`'s nest is ~40 lines), factor it into a module-level helper function
-(`_build_matmul_nest`) and call that from the branch. An element-wise tensor op needs no loop
-code of its own: pass a `compute(a, b)` function for one element to
-`_build_tensor_elementwise_nest`, which builds one loop per dim with `_build_nest` and reads
-each operand with broadcasting.
+**Any other op** needs its own nest. Write a module-level helper that returns
+`(new_ops, result_value)`, as `_build_matmul_nest` does, and add a branch for the op's name
+next to `hc.matmul`'s. The shared `rewriter.replace(op, new_ops=..., new_results=[...],
+safe_erase=True)` at the end of the method then swaps the op for the new ones.
 
 ## 4. Interpreter (`simulator/interpreter.py`)
 
@@ -116,7 +115,7 @@ existing one, each test is just a new row in a parametrized table.
 - **`tests/test_lowering.py`:** one FileCheck test. Write the op in generic form, run it
   through `check_lowering`, and match the lowered IR with `// CHECK:` lines. Captures such as
   `%[[ZERO:.*]]` show how the new ops are wired together. `check_lowering` also checks that no
-  `hc.` op survives (step 3's guard). The `hc.relu` test:
+  `hc.` op survives. The `hc.relu` test:
 
   ```python
   def test_relu():
