@@ -1,17 +1,21 @@
 """Lowers hc ops to arith/scf/tensor, with value semantics.
 
-- Scalar `hc.add/sub/mul/relu` become one arith op each.
-- `hc.pow` becomes an `scf.for` multiply loop.
-- `hc.max`/`hc.min` become `arith.cmpi` + `scf.if`.
-- Tensor ops become `scf.for` nests over `tensor.extract`/`tensor.insert`
-  (docs/DESIGN.md Section 3). The binary element-wise ones broadcast: each
-  operand is indexed by the result's induction variables, as far as its own
-  shape reaches (`_broadcast_extract`).
+An element-wise op has a kernel in `_KERNELS`: a function that builds the ops
+computing one element from scalar values.
 
-`LowerHCPattern` returns without rewriting for any op whose name is not in its
-dispatch tuple, and also for a listed name that has no branch. A missing
-lowering therefore leaves the hc op in the IR; `tests/test_lowering.py`
-asserts that none survive.
+- `hc.add/sub/mul/relu`: one arith op each.
+- `hc.pow`: an `scf.for` multiply loop.
+- `hc.max`/`hc.min`: `arith.cmpi` + `scf.if`.
+
+An op with a scalar result lowers to its kernel alone. An op with a tensor
+result lowers to an `scf.for` nest over `tensor.extract`/`tensor.insert`
+with the kernel in the innermost body (docs/DESIGN.md Section 3). The binary
+ones broadcast: each operand is indexed by the result's induction variables,
+as far as its own shape reaches (`_broadcast_extract`). `hc.matmul` has its
+own nest (`_build_matmul_nest`).
+
+`LowerHCPattern` raises NotImplementedError for an `hc` op that has neither
+a kernel nor its own nest.
 """
 from xdsl.dialects import arith, builtin, scf, tensor
 from xdsl.ir import Block, Operation, Region
@@ -19,10 +23,6 @@ from xdsl.pattern_rewriter import (
     RewritePattern,
     PatternRewriter
 )
-
-def _const_i32(value: int) -> arith.ConstantOp:
-    return arith.ConstantOp.from_int_and_width(value, 32)
-
 
 def _index_constants(*values: int) -> dict[int, arith.ConstantOp]:
     """Returns one `index` constant per distinct value, keyed by the value, so
@@ -166,7 +166,84 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
 
 
 # -----------------------------------------------------------------------------
-#  Tensor elementwise lowering helper (add/sub/mul/relu_tensor share this)
+#  Kernels: one element of an element-wise op
+#
+#  A kernel takes the op's operands as scalar values and returns
+#  (ops, result_value).
+# -----------------------------------------------------------------------------
+def _add(a, b):
+    add = arith.AddiOp(a, b)
+    return [add], add.result
+
+
+def _sub(a, b):
+    sub = arith.SubiOp(a, b)
+    return [sub], sub.result
+
+
+def _mul(a, b):
+    mul = arith.MuliOp(a, b)
+    return [mul], mul.result
+
+
+def _relu(x):
+    """max(x, 0)."""
+    zero = arith.ConstantOp.from_int_and_width(0, x.type)
+    mx = arith.MaxSIOp(x, zero.result)
+    return [zero, mx], mx.result
+
+
+def _pow(base, exp):
+    """A loop that runs `exp` times and multiplies an accumulator, which
+    starts at 1, by `base`."""
+    idx_ty = builtin.IndexType()
+    c0 = arith.ConstantOp.from_int_and_width(0, idx_ty)
+    c1 = arith.ConstantOp.from_int_and_width(1, idx_ty)
+    # The exponent is an integer; an scf.for bound must be an index.
+    exp_idx = arith.IndexCastOp(exp, idx_ty)
+    init = arith.ConstantOp.from_int_and_width(1, base.type)
+
+    body = Block(arg_types=[idx_ty, base.type])
+    _, acc = body.args
+    mul = arith.MuliOp(acc, base)
+    body.add_ops([mul, scf.YieldOp(mul.result)])
+
+    loop = scf.ForOp(c0.result, exp_idx.result, c1.result, [init.result], Region(body))
+    return [c0, c1, exp_idx, init, loop], loop.results[0]
+
+
+def _select(predicate: str):
+    """Returns a kernel that yields `a` when `a <predicate> b` holds, else
+    `b`, through an `scf.if`."""
+    def kernel(a, b):
+        cmp = arith.CmpiOp(a, b, predicate)
+        then_block = Block(arg_types=[])
+        then_block.add_ops([scf.YieldOp(a)])
+        else_block = Block(arg_types=[])
+        else_block.add_ops([scf.YieldOp(b)])
+        if_op = scf.IfOp(cmp.result, [a.type], Region(then_block), Region(else_block))
+        return [cmp, if_op], if_op.results[0]
+
+    return kernel
+
+
+_KERNELS = {
+    "hc.add": _add,
+    "hc.sub": _sub,
+    "hc.mul": _mul,
+    "hc.relu": _relu,
+    "hc.pow": _pow,
+    "hc.max": _select("sgt"),  # signed greater-than
+    "hc.min": _select("slt"),  # signed less-than
+    "hc.add_tensor": _add,
+    "hc.sub_tensor": _sub,
+    "hc.mul_tensor": _mul,
+    "hc.relu_tensor": _relu,
+}
+
+
+# -----------------------------------------------------------------------------
+#  Tensor elementwise lowering helper
 # -----------------------------------------------------------------------------
 def _broadcast_extract(x, ivs, shape: list[int]):
     """Returns (ops, value) for the element of operand `x` that the result
@@ -190,15 +267,13 @@ def _broadcast_extract(x, ivs, shape: list[int]):
     return ([extract] if dims == res_dims else [zero, extract]), extract.result
 
 
-def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compute):
+def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, kernel):
     """Builds a loop nest, one loop per dim of `res_type`, that writes
-    `compute` of each element into a new tensor of `res_type`, and returns
+    `kernel` of each element into a new tensor of `res_type`, and returns
     (new_ops, result_value).
 
-    `operands` is [x] for a unary op or [lhs, rhs] for a binary one. Each is
-    read with `_broadcast_extract`, so it may be a scalar or a tensor whose
-    shape broadcasts to `res_type`'s.
-    `compute(a, b_or_None)` returns (ops, result_value) for one element.
+    Each operand is read with `_broadcast_extract`, so it may be a scalar or
+    a tensor whose shape broadcasts to `res_type`'s.
     """
     shape = [_as_int(d) for d in res_type.shape]
 
@@ -208,242 +283,32 @@ def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compu
             ops, value = _broadcast_extract(x, ivs, shape)
             read_ops += ops
             values.append(value)
-        a_val = values[0]
-        b_val = values[1] if len(operands) == 2 else None
-        compute_ops, result_val = compute(a_val, b_val)
+        kernel_ops, result_val = kernel(*values)
         inserted = tensor.InsertOp(result_val, carried, ivs)
-        return [*read_ops, *compute_ops, inserted], inserted.result
+        return [*read_ops, *kernel_ops, inserted], inserted.result
 
     return _build_nest(shape, res_type, body)
 
 
 # -----------------------------------------------------------------------------
-#  Lowering pattern: hc -> arith
+#  Lowering pattern: hc -> arith/scf/tensor
 # -----------------------------------------------------------------------------
 class LowerHCPattern(RewritePattern):
     def match_and_rewrite(self, op: Operation, rewriter: PatternRewriter):
-        # Debug: uncomment if you want to see traversal
-        # print("VISIT:", op.name)
-
-        if op.name not in (
-            "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
-            "hc.matmul", "hc.add_tensor", "hc.sub_tensor", "hc.mul_tensor", "hc.relu_tensor",
-        ):
+        if not op.name.startswith("hc."):
             return
 
-        # ---------------- hc.add ----------------
-        if op.name == "hc.add":
-            lhs, rhs = op.operands
-            new_op = arith.AddiOp(lhs, rhs)
-            rewriter.replace(
-                op,
-                new_ops=[new_op],
-                new_results=[new_op.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.mul ----------------
-        if op.name == "hc.mul":
-            lhs, rhs = op.operands
-            new_op = arith.MuliOp(lhs, rhs)
-            rewriter.replace(
-                op,
-                new_ops=[new_op],
-                new_results=[new_op.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.sub ----------------
-        if op.name == "hc.sub":
-            lhs, rhs = op.operands
-            new_op = arith.SubiOp(lhs, rhs)
-            rewriter.replace(
-                op,
-                new_ops=[new_op],
-                new_results=[new_op.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.relu ----------------
-        if op.name == "hc.relu":
-            x = op.operands[0]
-            c0 = _const_i32(0)
-
-            if hasattr(arith, "MaxSIOp"):
-                maxop = arith.MaxSIOp(x, c0.result)
-                rewriter.replace(
-                    op,
-                    new_ops=[c0, maxop],
-                    new_results=[maxop.result],
-                    safe_erase=True,
-                )
-                return
-            else:
-                raise RuntimeError(
-                    "Cannot lower hc.relu: arith.MaxSIOp needed."
-                )
-        # ---------------- hc.pow ----------------
-        if op.name == "hc.pow":
-            base, exp = op.operands
-            ty = op.results[0].type  # integer type
-
-            iv_ty = builtin.IndexType()
-
-            # loop-control constants must be index
-            c0 = arith.ConstantOp.from_int_and_width(0, iv_ty)
-            c1 = arith.ConstantOp.from_int_and_width(1, iv_ty)
-
-            # exponent is i32 -> cast to index for scf.for upper bound
-            exp_idx = arith.IndexCastOp(exp, iv_ty)
-
-            # init accumulator = 1
-            init = arith.ConstantOp.from_int_and_width(1, 32)
-
-            # scf.for body arguments: (iv: index, acc: i32)
-            body = Block(arg_types=[iv_ty, ty])
-            iv, acc = body.args
-
-            mul = arith.MuliOp(acc, base)
-            body.add_ops([mul, scf.YieldOp(mul.result)])
-
-            loop = scf.ForOp(
-                lb=c0.result,          # lower bound
-                ub=exp_idx.result,     # upper bound
-                step=c1.result,        # step
-                iter_args=[init.result],
-                body=Region(body),
-            )
-
-            # scf.ForOp returns the iter_args results
-            rewriter.replace(
-                op,
-                new_ops=[c0, c1, exp_idx, init, loop],
-                new_results=[loop.results[0]],
-                safe_erase=True,
-            )
-            return
-        # ---------------- hc.max ----------------
-        if op.name == "hc.max":
-            lhs, rhs = op.operands
-            ty = op.results[0].type
-
-            cmp = arith.CmpiOp(lhs, rhs, "sgt")  # signed greater-than
-
-            then_block = Block(arg_types=[])
-            then_block.add_ops([scf.YieldOp(lhs)])
-
-            else_block = Block(arg_types=[])
-            else_block.add_ops([scf.YieldOp(rhs)])
-
-            if_op = scf.IfOp(
-                cmp.result,
-                [ty],
-                Region(then_block),
-                Region(else_block),
-            )
-
-            rewriter.replace(
-                op,
-                new_ops=[cmp, if_op],
-                new_results=[if_op.results[0]],
-                safe_erase=True,
-            )
-            return
-        if op.name == "hc.min":
-            lhs, rhs = op.operands
-            ty = op.results[0].type
-
-            cmp = arith.CmpiOp(lhs, rhs, "slt")  # signed less-than
-
-            then_block = Block(arg_types=[])
-            then_block.add_ops([scf.YieldOp(lhs)])
-
-            else_block = Block(arg_types=[])
-            else_block.add_ops([scf.YieldOp(rhs)])
-
-            if_op = scf.IfOp(
-                cmp.result,
-                [ty],
-                Region(then_block),
-                Region(else_block),
-            )
-
-            rewriter.replace(
-                op,
-                new_ops=[cmp, if_op],
-                new_results=[if_op.results[0]],
-                safe_erase=True,
-            )
-            return
-
-        # ==========================================================
-        #  Tensor operations
-        # ==========================================================
-
-        # ---------------- hc.matmul (MxK * KxN -> MxN) ----------------
+        res_type = op.results[0].type
         if op.name == "hc.matmul":
             lhs, rhs = op.operands
-            new_ops, result = _build_matmul_nest(lhs, rhs, op.results[0].type)
-            rewriter.replace(
-                op,
-                new_ops=new_ops,
-                new_results=[result],
-                safe_erase=True,
-            )
-            return
+            new_ops, result = _build_matmul_nest(lhs, rhs, res_type)
+        else:
+            kernel = _KERNELS.get(op.name)
+            if kernel is None:
+                raise NotImplementedError(f"No lowering for {op.name}")
+            if isinstance(res_type, builtin.TensorType):
+                new_ops, result = _build_tensor_elementwise_nest(op.operands, res_type, kernel)
+            else:
+                new_ops, result = kernel(*op.operands)
 
-        # ---------------- hc.add_tensor ----------------
-        if op.name == "hc.add_tensor":
-            lhs, rhs = op.operands
-
-            def compute(a, b):
-                add = arith.AddiOp(a, b)
-                return [add], add.result
-
-            new_ops, result = _build_tensor_elementwise_nest([lhs, rhs], op.results[0].type, compute)
-            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
-            return
-
-        # ---------------- hc.sub_tensor ----------------
-        if op.name == "hc.sub_tensor":
-            lhs, rhs = op.operands
-
-            def compute(a, b):
-                sub = arith.SubiOp(a, b)
-                return [sub], sub.result
-
-            new_ops, result = _build_tensor_elementwise_nest([lhs, rhs], op.results[0].type, compute)
-            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
-            return
-
-        # ---------------- hc.mul_tensor ----------------
-        if op.name == "hc.mul_tensor":
-            lhs, rhs = op.operands
-
-            def compute(a, b):
-                mul = arith.MuliOp(a, b)
-                return [mul], mul.result
-
-            new_ops, result = _build_tensor_elementwise_nest([lhs, rhs], op.results[0].type, compute)
-            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
-            return
-
-        # ---------------- hc.relu_tensor ----------------
-        if op.name == "hc.relu_tensor":
-            (x,) = op.operands
-
-            def compute(a, _b):
-                # Zero of the element type: tensor lowerings don't assume i32.
-                zero = arith.ConstantOp.from_int_and_width(0, a.type)
-                mx = arith.MaxSIOp(a, zero.result)
-                return [zero, mx], mx.result
-
-            new_ops, result = _build_tensor_elementwise_nest([x], op.results[0].type, compute)
-            rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
-            return
-
-
-
+        rewriter.replace(op, new_ops=new_ops, new_results=[result], safe_erase=True)
