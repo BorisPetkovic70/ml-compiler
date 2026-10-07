@@ -26,18 +26,6 @@ def test_scalar_register_abi():
     """)
 
 
-def test_vector_typedef():
-    """A vector<4xi32> is passed in registers as a GCC `vector_size` type."""
-    filecheck(harness("""
-    func.func @my_func(%v: vector<4xi32>) -> vector<4xi32> {
-      func.return %v : vector<4xi32>
-    }"""), """
-    // CHECK: typedef int v4si __attribute__((vector_size(16)));
-    // CHECK: extern v4si my_func(v4si);
-    // CHECK: v4si r = my_func(a0);
-    """)
-
-
 # A bufferized matmul (2x3 @ 3x4) plus a scalar argument. Only the
 # signature matters to the generator.
 MEMREF_FUNC = """
@@ -76,6 +64,22 @@ def test_memref_call_and_free():
     // CHECK: free(result.allocated);
     // CHECK-NEXT: free(a0_data);
     // CHECK-NEXT: free(a1_data);
+    """)
+
+
+def test_rank_1_memref():
+    """A rank-1 memref has one size and one stride, and the result is
+    printed as a single row."""
+    filecheck(harness("""
+    func.func @my_func(%v: memref<4xi32>) -> memref<4xi32> {
+      func.return %v : memref<4xi32>
+    }"""), """
+    // CHECK: int64_t sizes[1];
+    // CHECK-NEXT: int64_t strides[1];
+    // CHECK-NEXT: } MemRef1D_i32;
+    // CHECK: extern void _mlir_ciface_my_func(MemRef1D_i32 *result, MemRef1D_i32 *a0);
+    // CHECK: MemRef1D_i32 a0 = { a0_data, a0_data, 0, {4}, {1} };
+    // CHECK: result.aligned[result.offset + i0 * result.strides[0]]
     """)
 
 

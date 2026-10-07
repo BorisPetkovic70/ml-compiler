@@ -17,7 +17,7 @@ TOOLCHAIN_BIN_DIR="${TOOLCHAIN_BIN_DIR:-$SCRIPT_DIR/../../../../MLIR_clone/llvm-
 BUILD_DIR=${SCRIPT_DIR}/../build
 
 # memref-bearing models (anything that went through bufferization) need the memref
-# passes plus a C-ABI wrapper; they are harmless no-ops for scalar/vector models.
+# passes plus a C-ABI wrapper; they are harmless no-ops for scalar-only models.
 #   --llvm-request-c-wrappers  emits _mlir_ciface_<fn>, which takes/returns memrefs as
 #                              pointers to descriptor structs the C harness can build
 #   --expand-strided-metadata  lowers memref metadata ops the memref pass expects

@@ -115,7 +115,7 @@ def main():
 
     # Generated *after* the middle end, not before it: bufferization rewrites tensor
     # arguments/results to memref, which changes the entry signature the harness has
-    # to match (for scalar/vector models the signature is unchanged either way).
+    # to match (for scalar-only models the signature is unchanged either way).
     back_end_dir = Path("back_end")
     harness_file = back_end_dir / f"{model_name}_harness.c"
     write_harness(module, harness_file, func_name="my_func")

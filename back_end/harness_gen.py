@@ -4,38 +4,18 @@ because bufferization changes the signature.
 
 The generator uses one of two calling conventions (docs/DESIGN.md Section 6):
 - If no memref appears in the signature, it calls `<fn>` directly, passing
-  scalars as `int` and vectors as GCC `vector_size` types.
+  scalars as `int`.
 - If any memref appears, it calls `_mlir_ciface_<fn>`, passing each memref
   as a pointer to a descriptor struct and receiving the result through a
   leading out-parameter. It frees the result buffer, which the callee
   allocated.
 
-The generated program reads one integer from argv per scalar, per vector
-lane, and per buffer element, in argument order. Any value not supplied
-defaults to `10 * (i + 1)` for scalar argument i, or `10*i + k + 1` for
-element k of shaped argument i.
+The generated program reads one integer from argv per scalar and per buffer
+element, in argument order. Any value not supplied defaults to `10 * (i + 1)`
+for scalar argument i, or `10*i + k + 1` for element k of memref argument i.
 """
 from xdsl.dialects import func
-from xdsl.dialects.builtin import MemRefType, VectorType
-
-
-def _vec_width(ty: VectorType) -> int:
-    n = 1
-    for d in ty.shape:
-        n *= int(getattr(d, "data", d))
-    return n
-
-
-def _type_spec(ty):
-    """('scalar', None) or ('vector', width)."""
-    if isinstance(ty, VectorType):
-        return ("vector", _vec_width(ty))
-    return ("scalar", None)
-
-
-def _c_type_name(spec) -> str:
-    kind, n = spec
-    return "int" if kind == "scalar" else f"v{n}si"
+from xdsl.dialects.builtin import IntegerType, MemRefType
 
 
 def _find_entry(module, func_name: str) -> func.FuncOp:
@@ -48,68 +28,48 @@ def _find_entry(module, func_name: str) -> func.FuncOp:
 
 def generate_harness_c(module, func_name: str = "my_func") -> str:
     """Returns the harness C source for `func_name`. Raises RuntimeError if
-    the function is missing, doesn't have exactly one result, or has a memref
+    the function is missing, doesn't have exactly one result, has a type
+    other than an integer or a memref in its signature, or has a memref
     signature the generator doesn't support."""
     fn = _find_entry(module, func_name)
     in_types = list(fn.function_type.inputs.data)
     out_types = list(fn.function_type.outputs.data)
     if len(out_types) != 1:
         raise RuntimeError("harness generator expects exactly 1 result")
+    for t in in_types + out_types:
+        if not isinstance(t, (IntegerType, MemRefType)):
+            raise RuntimeError(
+                f"harness generator: unsupported type {t} in the signature "
+                "(integers and memrefs only)"
+            )
 
     if any(isinstance(t, MemRefType) for t in in_types + out_types):
         return _generate_memref_harness(func_name, in_types, out_types[0])
-    return _generate_scalar_vector_harness(func_name, in_types, out_types[0])
+    return _generate_scalar_harness(func_name, len(in_types))
 
 
-def _generate_scalar_vector_harness(func_name, in_types, out_type) -> str:
-    arg_specs = [_type_spec(t) for t in in_types]
-    out_types = [out_type]
-    ret_spec = _type_spec(out_types[0])
-
-    widths = sorted({n for kind, n in arg_specs + [ret_spec] if kind == "vector"})
-
-    lines = ["#include <stdio.h>", "#include <stdlib.h>", ""]
-    for n in widths:
-        lines.append(f"typedef int v{n}si __attribute__((vector_size({4 * n})));")
-    if widths:
-        lines.append("")
-
-    c_arg_types = [_c_type_name(s) for s in arg_specs]
-    c_ret_type = _c_type_name(ret_spec)
-    lines.append(f"extern {c_ret_type} {func_name}({', '.join(c_arg_types) or 'void'});")
-    lines.append("")
-    lines.append("int main(int argc, char **argv) {")
-    lines.append("    int ai = 1;")
-
-    call_args = []
-    for i, (kind, n) in enumerate(arg_specs):
-        var = f"a{i}"
-        if kind == "scalar":
-            default = 10 * (i + 1)
-            lines.append(f"    int {var} = (argc > ai) ? atoi(argv[ai++]) : {default};")
-        else:
-            lines.append(f"    v{n}si {var};")
-            lines.append(f"    for (int k = 0; k < {n}; k++) {{")
-            lines.append(f"        {var}[k] = (argc > ai) ? atoi(argv[ai++]) : (10 * {i} + k + 1);")
-            lines.append("    }")
-        call_args.append(var)
-
-    call = f"{func_name}({', '.join(call_args)})"
-    ret_kind, ret_n = ret_spec
-    if ret_kind == "scalar":
-        lines.append(f"    int r = {call};")
-        lines.append('    printf("%d\\n", r);')
-    else:
-        lines.append(f"    v{ret_n}si r = {call};")
-        lines.append('    printf("[");')
-        lines.append(f"    for (int k = 0; k < {ret_n}; k++) {{")
-        lines.append('        printf(k == 0 ? "%d" : ", %d", r[k]);')
-        lines.append("    }")
-        lines.append('    printf("]\\n");')
-
-    lines.append("    return 0;")
-    lines.append("}")
-    lines.append("")
+def _generate_scalar_harness(func_name, num_args: int) -> str:
+    """Returns a harness that calls `func_name` directly with `num_args`
+    `int` arguments and prints its `int` result."""
+    call_args = [f"a{i}" for i in range(num_args)]
+    lines = [
+        "#include <stdio.h>",
+        "#include <stdlib.h>",
+        "",
+        f"extern int {func_name}({', '.join(['int'] * num_args) or 'void'});",
+        "",
+        "int main(int argc, char **argv) {",
+        "    int ai = 1;",
+    ]
+    for i, var in enumerate(call_args):
+        lines.append(f"    int {var} = (argc > ai) ? atoi(argv[ai++]) : {10 * (i + 1)};")
+    lines += [
+        f"    int r = {func_name}({', '.join(call_args)});",
+        '    printf("%d\\n", r);',
+        "    return 0;",
+        "}",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -171,18 +131,13 @@ def _print_result_lines(out_dims: list[int]) -> list[str]:
 
 
 def _generate_memref_harness(func_name, in_types, out_type) -> str:
-    """Raises RuntimeError for a non-memref result, a vector argument, a
-    memref that isn't rank 1-3, or an element type that isn't i8/i16/i32/i64."""
+    """Raises RuntimeError for a non-memref result, a memref that isn't
+    rank 1-3, or an element type that isn't i8/i16/i32/i64."""
     if not isinstance(out_type, MemRefType):
         raise RuntimeError(
             "harness generator: a memref-taking function must also return a memref "
             f"(got {out_type}); the C wrapper's out-parameter convention assumes it"
         )
-    for t in in_types:
-        if not isinstance(t, MemRefType) and isinstance(t, VectorType):
-            raise RuntimeError(
-                "harness generator: mixing vector and memref arguments is not supported"
-            )
 
     memref_types = [t for t in in_types if isinstance(t, MemRefType)] + [out_type]
     for t in memref_types:

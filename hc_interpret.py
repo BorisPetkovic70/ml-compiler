@@ -18,7 +18,7 @@ import copy
 import sys
 
 from xdsl.dialects import func
-from xdsl.dialects.builtin import MemRefType, TensorType, VectorType
+from xdsl.dialects.builtin import MemRefType, TensorType
 
 from front_end.build_model import MODEL_PATH
 from hc_main import load_module, resolve_model_path, run_middle_end
@@ -51,7 +51,7 @@ def args_from_argv(fn: func.FuncOp, values: list[int]) -> list:
 
     args = []
     for i, ty in enumerate(fn.function_type.inputs):
-        if isinstance(ty, (VectorType, TensorType, MemRefType)):
+        if isinstance(ty, (TensorType, MemRefType)):
             dims = [d.data for d in ty.shape]
             count = 1
             for d in dims:

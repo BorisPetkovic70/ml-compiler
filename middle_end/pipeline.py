@@ -53,7 +53,7 @@ class MiddleEndPipeline:
             self._print_module(module, "=== AFTER LOWERING (arith.*) ===")
 
         if self.config.apply_bufferization:
-            # Bufferize any function using tensors (a no-op on scalar/vector-only ones)
+            # Bufferize any function using tensors (a no-op on scalar-only ones)
             apply_bufferization(module)
             self._print_module(module, "=== AFTER BUFFERIZATION (memref.*) ===")
 
