@@ -258,23 +258,23 @@ class Interpreter:
                 self._set(op.results[0], val)
                 continue
 
-            # --- high-level HC ops (scalar and vector variants share semantics) ---
-            if name in ("hc.add", "hc.add_vec", "hc.add_tensor"):
+            # --- high-level HC ops (scalar and tensor variants share semantics) ---
+            if name in ("hc.add", "hc.add_tensor"):
                 a, b = op.operands
                 self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p + q))
                 continue
 
-            if name in ("hc.sub", "hc.sub_vec", "hc.sub_tensor"):
+            if name in ("hc.sub", "hc.sub_tensor"):
                 a, b = op.operands
                 self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p - q))
                 continue
 
-            if name in ("hc.mul", "hc.mul_vec", "hc.mul_vec_vec", "hc.mul_tensor"):
+            if name in ("hc.mul", "hc.mul_tensor"):
                 a, b = op.operands
                 self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p * q))
                 continue
 
-            if name in ("hc.relu", "hc.relu_vec", "hc.relu_tensor"):
+            if name in ("hc.relu", "hc.relu_tensor"):
                 (x,) = op.operands
                 self._set(op.results[0], _elt_binop(self._get(x), 0, max))
                 continue

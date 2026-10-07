@@ -75,45 +75,6 @@ def test_pow():
 
 
 @pytest.mark.parametrize("hc_op,arith_op", [
-    ("hc.add_vec", "arith.addi"), ("hc.sub_vec", "arith.subi"),
-    ("hc.mul_vec_vec", "arith.muli"),
-])
-def test_vector_binop(hc_op, arith_op):
-    check_lowering(f"""
-    func.func @f(%a: vector<4xi32>, %b: vector<4xi32>) -> vector<4xi32> {{
-      %r = "{hc_op}"(%a, %b) : (vector<4xi32>, vector<4xi32>) -> vector<4xi32>
-      func.return %r : vector<4xi32>
-    }}""", f"""
-    // CHECK: %[[R:.*]] = {arith_op} %a, %b : vector<4xi32>
-    // CHECK: func.return %[[R]] : vector<4xi32>
-    """)
-
-
-def test_mul_vec_broadcasts_the_scalar():
-    check_lowering("""
-    func.func @f(%s: i32, %v: vector<4xi32>) -> vector<4xi32> {
-      %r = "hc.mul_vec"(%s, %v) : (i32, vector<4xi32>) -> vector<4xi32>
-      func.return %r : vector<4xi32>
-    }""", """
-    // CHECK: %[[S:.*]] = vector.broadcast %s : i32 to vector<4xi32>
-    // CHECK: %[[R:.*]] = arith.muli %v, %[[S]] : vector<4xi32>
-    // CHECK: func.return %[[R]] : vector<4xi32>
-    """)
-
-
-def test_relu_vec():
-    check_lowering("""
-    func.func @f(%x: vector<4xi32>) -> vector<4xi32> {
-      %r = "hc.relu_vec"(%x) : (vector<4xi32>) -> vector<4xi32>
-      func.return %r : vector<4xi32>
-    }""", """
-    // CHECK: %[[ZERO:.*]] = arith.constant dense<0> : vector<4xi32>
-    // CHECK: %[[R:.*]] = arith.maxsi %x, %[[ZERO]] : vector<4xi32>
-    // CHECK: func.return %[[R]] : vector<4xi32>
-    """)
-
-
-@pytest.mark.parametrize("hc_op,arith_op", [
     ("hc.add_tensor", "arith.addi"), ("hc.sub_tensor", "arith.subi"),
     ("hc.mul_tensor", "arith.muli"),
 ])

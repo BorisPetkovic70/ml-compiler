@@ -1,9 +1,8 @@
-"""The `hc` dialect: ONNX-shaped integer ops, one family each for scalars,
-vectors (`*_vec`), and tensors (`*_tensor`, `hc.matmul`). See docs/DESIGN.md
-Sections 1-2.
+"""The `hc` dialect: ONNX-shaped integer ops, one family for scalars and one
+for tensors (`*_tensor`, `hc.matmul`). See docs/DESIGN.md Sections 1-2.
 
-`VecInt`/`TensorInt` constrain only the element type. Every rule relating the
-types or shapes of an op's operands and result is enforced by that op's
+`TensorInt` constrains only the element type. Every rule relating the types
+or shapes of an op's operands and result is enforced by that op's
 `verify_()`, which raises `ValueError`. Element-wise tensor ops accept any
 rank >= 1; `hc.matmul` accepts rank 2, or rank 3 with a leading batch dim.
 The binary element-wise tensor ops broadcast their operands with NumPy's
@@ -20,7 +19,7 @@ from xdsl.irdl import (
     operand_def,
     result_def,
 )
-from xdsl.dialects.builtin import IntegerType, VectorType, TensorType
+from xdsl.dialects.builtin import IntegerType, TensorType
 
 # -----------------------------
 # Operations
@@ -113,92 +112,6 @@ class HCMin(IRDLOperation):
     def verify_(self):
         if self.lhs.type != self.rhs.type or self.res.type != self.lhs.type:
             raise ValueError("hc.min: operands and result must have the same integer type")
-
-# -----------------------------
-# Vector operations
-# -----------------------------
-# "Vector of integers" type constraint (any rank/shape, integer element type)
-VecInt = VectorType.constr(element_type=IntegerType)
-
-
-def _verify_bin_same_vec_type(op: IRDLOperation):
-    """Requires lhs, rhs, and res to have the identical vector type."""
-    lhs_t = op.lhs.type
-    rhs_t = op.rhs.type
-    res_t = op.res.type
-    if lhs_t != rhs_t:
-        raise ValueError(
-            f"{op.name}: lhs and rhs must have the same vector type, got {lhs_t} vs {rhs_t}"
-        )
-    if res_t != lhs_t:
-        raise ValueError(
-            f"{op.name}: result must match operand vector type, got res={res_t}, operand={lhs_t}"
-        )
-
-
-@irdl_op_definition
-class HCAddVec(IRDLOperation):
-    name = "hc.add_vec"
-    lhs = operand_def(VecInt)
-    rhs = operand_def(VecInt)
-    res = result_def(VecInt)
-
-    def verify_(self):
-        _verify_bin_same_vec_type(self)
-
-
-@irdl_op_definition
-class HCSubVec(IRDLOperation):
-    name = "hc.sub_vec"
-    lhs = operand_def(VecInt)
-    rhs = operand_def(VecInt)
-    res = result_def(VecInt)
-
-    def verify_(self):
-        _verify_bin_same_vec_type(self)
-
-
-@irdl_op_definition
-class HCMulVec(IRDLOperation):
-    """scalar * vector -> vector: multiplies every lane by `scalar`."""
-    name = "hc.mul_vec"
-    scalar = operand_def(IntegerType)
-    vec = operand_def(VecInt)
-    res = result_def(VecInt)
-
-    def verify_(self):
-        if self.res.type != self.vec.type:
-            raise ValueError(
-                f"{self.name}: result must match vector operand type, "
-                f"got res={self.res.type}, vec={self.vec.type}"
-            )
-
-
-@irdl_op_definition
-class HCReluVec(IRDLOperation):
-    """Element-wise max(x, 0) over a vector."""
-    name = "hc.relu_vec"
-    x = operand_def(VecInt)
-    res = result_def(VecInt)
-
-    def verify_(self):
-        if self.res.type != self.x.type:
-            raise ValueError(
-                f"{self.name}: result must match operand vector type, "
-                f"got res={self.res.type}, x={self.x.type}"
-            )
-
-@irdl_op_definition
-class HCMulVecVec(IRDLOperation):
-    """Element-wise vector * vector -> vector."""
-    name = "hc.mul_vec_vec"
-    lhs = operand_def(VecInt)
-    rhs = operand_def(VecInt)
-    res = result_def(VecInt)
-
-    def verify_(self):
-            _verify_bin_same_vec_type(self)
-
 
 # -----------------------------
 # Tensor operations
@@ -379,7 +292,6 @@ HiCompiler = Dialect(
     "hc",
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # scalar ops
-        HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec,  # vector ops
         HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor ops
     ),
     (),  # attrs

@@ -1,7 +1,6 @@
-"""Lowers hc ops to arith/scf/vector/tensor, with value semantics.
+"""Lowers hc ops to arith/scf/tensor, with value semantics.
 
-- Scalar and vector ops become one arith op each; `hc.mul_vec` first
-  broadcasts its scalar with `vector.broadcast`.
+- Scalar `hc.add/sub/mul/relu` become one arith op each.
 - `hc.pow` becomes an `scf.for` multiply loop.
 - `hc.max`/`hc.min` become `arith.cmpi` + `scf.if`.
 - Tensor ops become `scf.for` nests over `tensor.extract`/`tensor.insert`
@@ -14,7 +13,7 @@ dispatch tuple, and also for a listed name that has no branch. A missing
 lowering therefore leaves the hc op in the IR; `tests/test_lowering.py`
 asserts that none survive.
 """
-from xdsl.dialects import arith, builtin, scf, tensor, vector
+from xdsl.dialects import arith, builtin, scf, tensor
 from xdsl.ir import Block, Operation, Region
 from xdsl.pattern_rewriter import (
     RewritePattern,
@@ -35,7 +34,7 @@ def _index_constants(*values: int) -> dict[int, arith.ConstantOp]:
 
 
 # -----------------------------------------------------------------------------
-#  Vector lowering helpers
+#  Shape helpers
 # -----------------------------------------------------------------------------
 def _as_int(x) -> int:
     """Convert xDSL int-like objects (IntAttr, nested attrs) to a python int."""
@@ -46,28 +45,6 @@ def _as_int(x) -> int:
     if hasattr(x, "value") and hasattr(x.value, "data"):
         return int(x.value.data)
     return int(x)
-
-
-def _vec_num_elements(vec_type: builtin.VectorType) -> int:
-    """Total number of elements in a vector type (product of its shape dims)."""
-    shape = getattr(vec_type, "shape", None)
-    if shape is None:
-        raise RuntimeError(f"Vector type has no 'shape' attribute: {vec_type}")
-    n = 1
-    for d in shape:
-        n *= _as_int(d)
-    return n
-
-
-def _const_zero_like(like_type) -> arith.ConstantOp:
-    """Returns a constant 0: a dense vector of `like_type` for a vector type,
-    otherwise an i32."""
-    if isinstance(like_type, builtin.VectorType):
-        count = _vec_num_elements(like_type)
-        dense = builtin.DenseIntOrFPElementsAttr.from_list(like_type, [0] * count)
-        return arith.ConstantOp(dense)
-    # scalar integer fallback
-    return _const_i32(0)
 
 
 # -----------------------------------------------------------------------------
@@ -250,7 +227,6 @@ class LowerHCPattern(RewritePattern):
 
         if op.name not in (
             "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
-            "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.mul_vec_vec", "hc.relu_vec",
             "hc.matmul", "hc.add_tensor", "hc.sub_tensor", "hc.mul_tensor", "hc.relu_tensor",
         ):
             return
@@ -402,81 +378,6 @@ class LowerHCPattern(RewritePattern):
                 safe_erase=True,
             )
             return
-
-        # ==========================================================
-        #  Vector operations
-        #  arith.* ops operate element-wise on vectors when the
-        #  operand/result types match.
-        # ==========================================================
-
-        # ---------------- hc.add_vec ----------------
-        if op.name == "hc.add_vec":
-            lhs, rhs = op.operands
-            new_op = arith.AddiOp(lhs, rhs)
-            rewriter.replace(
-                op,
-                new_ops=[new_op],
-                new_results=[new_op.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.sub_vec ----------------
-        if op.name == "hc.sub_vec":
-            lhs, rhs = op.operands
-            new_op = arith.SubiOp(lhs, rhs)
-            rewriter.replace(
-                op,
-                new_ops=[new_op],
-                new_results=[new_op.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.mul_vec (scalar * vector -> vector) ----------------
-        if op.name == "hc.mul_vec":
-            scalar, vec = op.operands
-
-            # arith.muli needs matching types, so broadcast the (possibly runtime)
-            # scalar to vec's vector type.
-            bcast = vector.BroadcastOp(scalar, vec.type)
-            mul = arith.MuliOp(vec, bcast.vector)
-            rewriter.replace(
-                op,
-                new_ops=[bcast, mul],
-                new_results=[mul.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.mul_vec_vec (vector * vector -> vector) ----------------
-        if op.name == "hc.mul_vec_vec":
-            lhs, rhs = op.operands
-            new_op = arith.MuliOp(lhs, rhs)
-            rewriter.replace(
-                op,
-                new_ops=[new_op],
-                new_results=[new_op.result],
-                safe_erase=True,
-            )
-            return
-
-        # ---------------- hc.relu_vec ----------------
-        if op.name == "hc.relu_vec":
-            x = op.operands[0]
-            c0 = _const_zero_like(x.type)  # dense-zero vector of x's type
-
-            if hasattr(arith, "MaxSIOp"):
-                maxop = arith.MaxSIOp(x, c0.result)
-                rewriter.replace(
-                    op,
-                    new_ops=[c0, maxop],
-                    new_results=[maxop.result],
-                    safe_erase=True,
-                )
-                return
-            else:
-                raise RuntimeError("Cannot lower hc.relu_vec: arith.MaxSIOp needed.")
 
         # ==========================================================
         #  Tensor operations

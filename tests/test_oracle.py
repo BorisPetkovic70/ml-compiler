@@ -38,9 +38,6 @@ def value_type(shape) -> str:
     ("hc.max", "i32", 3, 9, 9),
     ("hc.min", "i32", 3, 9, 3),
     ("hc.pow", "i32", -2, 3, -8),
-    ("hc.add_vec", "vector<4xi32>", [1, 2, 3, 4], [10, 20, 30, 40], [11, 22, 33, 44]),
-    ("hc.sub_vec", "vector<4xi32>", [10, 20, 30, 40], [1, 2, 3, 4], [9, 18, 27, 36]),
-    ("hc.mul_vec_vec", "vector<4xi32>", [1, 2, 3, 4], [2, 3, 4, 5], [2, 6, 12, 20]),
     ("hc.add_tensor", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[10, 20], [30, 40]], [[11, 22], [33, 44]]),
     ("hc.sub_tensor", "tensor<2x2xi32>", [[10, 20], [30, 40]], [[1, 2], [3, 4]], [[9, 18], [27, 36]]),
     ("hc.mul_tensor", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[2, 3], [4, 5]], [[2, 6], [12, 20]]),
@@ -83,7 +80,6 @@ def test_broadcast_matches_numpy(a_shape, b_shape):
 
 @pytest.mark.parametrize("op,ty,x,expected", [
     ("hc.relu", "i32", -3, 0),
-    ("hc.relu_vec", "vector<4xi32>", [-1, 2, -3, 4], [0, 2, 0, 4]),
     ("hc.relu_tensor", "tensor<2x2xi32>", [[-1, 2], [3, -4]], [[0, 2], [3, 0]]),
 ])
 def test_relu(op, ty, x, expected):
@@ -92,15 +88,6 @@ def test_relu(op, ty, x, expected):
       %r = "{op}"(%x) : ({ty}) -> {ty}
       func.return %r : {ty}
     }}""", [x], expected)
-
-
-def test_mul_vec():
-    """A scalar times every lane of a vector."""
-    check_oracle("""
-    func.func @f(%s: i32, %v: vector<4xi32>) -> vector<4xi32> {
-      %r = "hc.mul_vec"(%s, %v) : (i32, vector<4xi32>) -> vector<4xi32>
-      func.return %r : vector<4xi32>
-    }""", [3, [1, 2, 3, 4]], [3, 6, 9, 12])
 
 
 @pytest.mark.parametrize("a_shape,b_shape", [

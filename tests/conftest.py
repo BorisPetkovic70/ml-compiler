@@ -11,8 +11,7 @@ import pytest
 from xdsl.context import Context
 from xdsl.parser import Parser
 from xdsl.dialects.builtin import (
-    Builtin, ModuleOp, IntegerType, VectorType, TensorType,
-    DenseIntOrFPElementsAttr,
+    Builtin, ModuleOp, IntegerType, TensorType,
 )
 from xdsl.dialects import func, arith, memref, scf, tensor, vector
 from hc_dialect import HiCompiler
@@ -59,14 +58,6 @@ def filecheck(output, checks: str) -> None:
                     pytrace=False)
 
 
-def vec_ty(n: int, width: int = 32) -> VectorType:
-    elem = IntegerType(width)
-    try:
-        return VectorType([n], elem)
-    except TypeError:
-        return VectorType(elem, [n])
-
-
 def tensor_ty(*dims: int, width: int = 32) -> TensorType:
     """TensorType<...xi32> with the given dims, e.g. `tensor_ty(2, 3)` for
     tensor<2x3xi32>."""
@@ -75,11 +66,6 @@ def tensor_ty(*dims: int, width: int = 32) -> TensorType:
 
 def const_i32(value: int) -> arith.ConstantOp:
     return arith.ConstantOp.from_int_and_width(value, 32)
-
-
-def const_vec(values: list[int]) -> arith.ConstantOp:
-    ty = vec_ty(len(values))
-    return arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(ty, values))
 
 
 def run(module: ModuleOp, args=(), func_name: str = "my_func"):
