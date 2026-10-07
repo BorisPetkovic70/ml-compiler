@@ -1,15 +1,16 @@
 # ml-compiler
 
 A small ONNX-to-native compiler built on [xDSL](https://xdsl.dev/). It imports an ONNX model
-into a custom `hc` dialect, lowers it through MLIR's `arith`/`scf`/`vector`/`tensor`/`memref`
+into a custom `hc` dialect, lowers it through MLIR's `arith`/`scf`/`tensor`/`memref`
 dialects, and compiles it to an executable with LLVM. A pure-Python interpreter runs the same
 IR at every stage and is the test suite's correctness oracle.
 
 **Supported:** ONNX `Add`, `Sub`, `Mul`, `MatMul`, `Relu`, `Pow`, `Max`, `Min`, `Constant`;
-initializers (weights); `int32` only; one model output. Rank-0 inputs become scalars, rank-1 vectors, rank-2/3 tensors
-(rank 3 = one leading batch dim). `Pow`/`Max`/`Min` are scalar-only. `Add`/`Sub`/`Mul`
-broadcast a tensor with a scalar or with another tensor (`[M,N] + [1,N]`). The loader rejects
-other element types, rank 4+, symbolic dims, and a tensor combined with a rank-1 vector.
+initializers (weights); `int32` only; one model output. Rank-0 values are scalars, ranks 1-3
+tensors (`MatMul` takes rank 2, or rank 3 with one leading batch dim). `Pow`/`Max`/`Min` are
+scalar-only. `Add`/`Sub`/`Mul` broadcast by NumPy's rules: a tensor with a scalar or with
+another tensor (`[M,N] + [N]`). The loader rejects other element types, rank 4+ and symbolic
+dims.
 
 ```
 ONNX ─▶ front_end/loader.py ─▶ hc.* ─▶ middle_end/pipeline.py ─▶ back_end/harness_gen.py ─▶ back_end/back_end.sh
@@ -86,8 +87,8 @@ for the same arguments.
   score model**.
 - **`TOOLCHAIN_BIN_DIR`:** directory holding `mlir-opt`/`mlir-translate`/`llc`. The default in
   `back_end/back_end.sh` is a machine-specific path; override it with the env var.
-- **Args** (executable and `hc_interpret.py`): one integer per scalar, per vector lane, or per
-  buffer element, in argument order. Missing args fall back to the same built-in defaults in
+- **Args** (executable and `hc_interpret.py`): one integer per scalar or per buffer
+  element, in argument order. Missing args fall back to the same built-in defaults in
   both.
 
 ## Generated files
@@ -105,7 +106,7 @@ for the same arguments.
 ## Layout
 
 ```
-hc_dialect.py           the hc dialect: scalar, vector (*_vec) and tensor (*_tensor, matmul) ops
+hc_dialect.py           the hc dialect: scalar and tensor (*_tensor, matmul) ops
 hc_main.py              compile driver: ONNX → hc → middle end → .mlir + harness
 hc_interpret.py         interpreter driver: runs a model on given arguments, before and after the middle end
 full_compiler.sh        hc_main.py + hc_interpret.py + back_end/back_end.sh, then compares the two results

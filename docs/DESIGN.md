@@ -12,10 +12,10 @@ ONNX graph
 hc.* dialect                    WHAT is computed (one op per ONNX node)
   │  middle_end/hc_lowering.py  HOW: loops over values (value semantics)
   ▼
-arith / scf / vector / tensor
+arith / scf / tensor
   │  middle_end/bufferization.py  WHERE: tensors become buffers (memory semantics)
   ▼
-arith / scf / vector / memref
+arith / scf / memref
   │  back_end/back_end.sh       mlir-opt → mlir-translate → llc → clang
   ▼
 native executable  (+ back_end/harness_gen.py's generated C main)
@@ -28,18 +28,18 @@ so it can be verified, printed and interpreted with the same tools as everything
 Each stage boundary is also a test boundary: the interpreter (§6) runs the IR on both sides of
 a transform, and the results must match.
 
-## 2. Scalars, vectors, tensors
+## 2. Scalars and tensors
 
-These are three separate kinds of value, each with its own op family (`hc.add`, `hc.add_vec`,
-`hc.add_tensor`, …), because each maps onto hardware differently:
+These are two separate kinds of value, each with its own op family (`hc.add`,
+`hc.add_tensor`, …), because each maps onto hardware differently. Every ONNX value of rank 1
+or more is a tensor:
 
 | Kind | Type | Hardware | Lowering |
 |---|---|---|---|
 | scalar | `i32` | general register | one `arith` op (`hc.add` → `arith.addi`) |
-| vector | `vector<Nxi32>` | SIMD register | one `arith` op; `arith` is already element-wise on vectors. `hc.mul_vec` (scalar × vector) adds a `vector.broadcast` |
 | tensor | `tensor<Nxi32>`, `tensor<MxNxi32>`, … | none | an `scf.for` loop nest |
 
-The type constraints (`VecInt`, `TensorInt`) only fix the element type. They do not relate the
+The type constraint `TensorInt` only fixes the element type. It does not relate the
 shapes of different operands, so every op with a shape rule (same shape; a broadcast shape;
 `MxK · KxN → MxN`; a matching batch dim) enforces it in a hand-written `verify_()`. Keeping
 families separate keeps each verifier small.
@@ -209,7 +209,7 @@ signature varies per model. So `harness_gen.py` generates one harness per model,
 between two conventions:
 
 - **"Register ABI"** (no memref in the signature): calls `my_func` directly with ordinary
-  by-value C arguments: `int` for scalars, a GCC `vector_size` type for vectors.
+  by-value C `int` arguments. Only an all-scalar model has such a signature.
 - **C-interface ABI** (any memref): calls `_mlir_ciface_my_func`, a wrapper that
   `mlir-opt --llvm-request-c-wrappers` generates. Each memref is passed as a pointer to a
   *descriptor struct* `{allocated, aligned, offset, sizes[R], strides[R]}`. A memref result
@@ -221,9 +221,9 @@ between two conventions:
   ```
 
 Because bufferization changes a tensor signature into a memref one, the harness is generated
-*after* the middle end. The generator raises an error for any shape it doesn't model: a
-memref of rank 0 or ≥4, a non-`i8/16/32/64` element type, a memref argument with a non-memref
-result, or vector and memref arguments mixed.
+*after* the middle end. The generator raises an error for any signature it doesn't model: a
+type other than an integer or a memref, a memref of rank 0 or ≥4, a non-`i8/16/32/64` element
+type, or a memref argument with a non-memref result.
 
 Weights (`memref.global`) live in the executable's read-only data. clang links a
 position-independent executable by default, so `back_end.sh` runs `llc` with
@@ -272,12 +272,12 @@ Each limit below exists because no current workload needs it, not by accident.
 
 - **`i32` only.** The loader rejects any ONNX element type other than `INT32`. The scalar
   `hc.relu`/`hc.pow` lowerings hardcode `i32` constants.
-- **Shapes:** rank 0 (scalar), 1 (vector), 2–3 (tensor, one batch dim), with every dim a known
-  positive size. The loader rejects anything else (rank 4+, symbolic dims).
-- **Broadcasting covers tensors and scalars only.** The `*_tensor` binary ops broadcast (§2).
-  The scalar and vector ops need matching types, apart from `hc.mul_vec`'s scalar × vector.
-  A rank-1 ONNX value is a vector, so the loader rejects a bias add `[M,N] + [N]`, while
-  `[M,N] + [1,N]` works.
+- **Shapes:** rank 0 (scalar) and ranks 1–3 (tensor), with every dim a known positive size.
+  The loader rejects anything else (rank 4+, symbolic dims). `hc.matmul` takes rank 2, or
+  rank 3 with one leading batch dim.
+- **Only `add`/`sub`/`mul` broadcast.** The `*_tensor` binary ops broadcast (§2), so a bias
+  add `[M,N] + [N]` works. `hc.pow`/`hc.max`/`hc.min` are scalar-only, and `hc.matmul` needs
+  equal batch dims.
 - **One function, one block, one output.** The loader, bufferization and interpreter all
   assume this.
 - **No overflow model.** Python ints don't wrap the way `i32` does in hardware.
@@ -285,8 +285,6 @@ Each limit below exists because no current workload needs it, not by accident.
   correct only while branches yield already-computed values (true for `hc.max`/`hc.min`).
 - **Bufferization copies in the top-level block only** (§4). A write inside a loop body that
   would need a copy is refused.
-- **Harness:** no vector and memref arguments in the same signature. Large vectors still use the
-  register ABI rather than being routed through the memref convention.
 - **DCE** only scans the function's top-level block, not loop or `if` bodies.
 - **`analysis.py`**: bufferization uses `is_last_use`. The use-def and liveness printing is
   wired to a config flag, but no pass uses it, and its liveness is block-local (it doesn't see

@@ -9,7 +9,7 @@ shaped this way, see [DESIGN.md](DESIGN.md).
 
 Define the op as an `IRDLOperation` subclass with `@irdl_op_definition`, its operands/results
 via `operand_def(...)`/`result_def(...)`, and a hand-written `verify_(self)` for any
-cross-operand invariant the type system alone can't express (`VecInt`/`TensorInt` don't bind
+cross-operand invariant the type system alone can't express (`TensorInt` doesn't bind
 shapes across operands, so every op with a shape relationship between its operands needs its own
 verifier — see DESIGN.md Section 2):
 
@@ -35,7 +35,6 @@ HiCompiler = Dialect(
     "hc",
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,      # scalar ops
-        HCAddVec, HCSubVec, HCMulVec, HCReluVec, HCMulVecVec,  # vector ops
         HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor ops
     ),
     (),  # attrs
@@ -62,8 +61,8 @@ if node.op_type == "MatMul":
     continue
 ```
 
-If the op has scalar/vector/tensor variants (like `Add`/`Mul`), dispatch on `_is_tensor(...)` /
-`_is_vec(...)` for each operand, following the existing `Add`/`Sub`/`Mul` branches. A
+If the op has scalar and tensor variants (like `Add`/`Mul`), dispatch on `_is_tensor(...)` for
+each operand, following the existing `Add`/`Sub`/`Mul` branches. A
 broadcasting tensor op takes its result type from `broadcast_type(a, b)`.
 
 ## 3. Lowering (`middle_end/hc_lowering.py`)
@@ -74,7 +73,6 @@ opens with a dispatch guard:
 ```python
 if op.name not in (
     "hc.add", "hc.mul", "hc.sub", "hc.relu", "hc.pow", "hc.max", "hc.min",
-    "hc.add_vec", "hc.sub_vec", "hc.mul_vec", "hc.mul_vec_vec", "hc.relu_vec",
     "hc.matmul", "hc.add_tensor", "hc.sub_tensor", "hc.mul_tensor", "hc.relu_tensor",
 ):
     return
