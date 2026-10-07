@@ -77,7 +77,7 @@ build/matmul_run [args...]                   # rerun a compiled model
 `full_compiler.sh` fails unless the executable prints exactly what the interpreter computes
 for the same arguments.
 
-- **Sample models:** `score_model` (scalar), `vec_affine_relu` (vector), `matmul`,
+- **Sample models:** `score_model` (scalar), `affine_relu` (rank 1, scalar × tensor), `matmul`,
   `chained_tensor_math` (ReLU(A@B + C)), `batched_matmul`, `dense_layer` (ReLU(X@W + B), with
   `W` and `B` stored in the model as weights).
 - **Model argument:** `matmul.onnx` and `build/matmul.onnx` are equivalent; the stem (`matmul`)

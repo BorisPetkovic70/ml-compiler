@@ -15,7 +15,7 @@ from xdsl.dialects import func, arith
 from hc_dialect import HiCompiler
 from front_end.build_model import (
     build_score_model, MODEL_PATH,
-    build_vec_affine_relu_model, VEC_AFFINE_RELU_MODEL_PATH,
+    build_affine_relu_model, AFFINE_RELU_MODEL_PATH,
     build_matmul_model, MATMUL_MODEL_PATH,
     build_chained_tensor_model, CHAINED_TENSOR_MODEL_PATH,
     build_batched_matmul_model, BATCHED_MATMUL_MODEL_PATH,
@@ -55,7 +55,7 @@ def resolve_model_path(model_arg: str) -> Path:
         # not listed here still falls back to the score model.
         builders = {
             Path(MODEL_PATH).name: build_score_model,
-            Path(VEC_AFFINE_RELU_MODEL_PATH).name: build_vec_affine_relu_model,
+            Path(AFFINE_RELU_MODEL_PATH).name: build_affine_relu_model,
             Path(MATMUL_MODEL_PATH).name: build_matmul_model,
             Path(CHAINED_TENSOR_MODEL_PATH).name: build_chained_tensor_model,
             Path(BATCHED_MATMUL_MODEL_PATH).name: build_batched_matmul_model,

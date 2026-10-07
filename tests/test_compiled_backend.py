@@ -17,7 +17,7 @@ import pytest
 from hc_main import build_context
 from front_end.loader import import_onnx_to_hc_module
 from front_end.build_model import (
-    build_score_model, build_vec_affine_relu_model, build_matmul_model,
+    build_score_model, build_affine_relu_model, build_matmul_model,
 )
 from middle_end.pipeline import MiddleEndPipeline, MiddleEndPipelineConfig
 from back_end.harness_gen import write_harness
@@ -117,8 +117,8 @@ def test_rank_1_tensor_abi_compiles_and_matches_independent_oracle(tmp_path):
     """C-interface ABI with rank-1 memrefs and a by-value scalar in one
     signature. y = relu((a*x + b) * w), w = [7,2,3,5]; b has a negative
     element so relu actually clamps something."""
-    onnx_path = tmp_path / "vec_affine_relu.onnx"
-    build_vec_affine_relu_model(str(onnx_path), n=4)
+    onnx_path = tmp_path / "affine_relu.onnx"
+    build_affine_relu_model(str(onnx_path), n=4)
 
     x = [1, 2, 3, 4]
     a = 3

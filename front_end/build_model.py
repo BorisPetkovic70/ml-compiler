@@ -12,7 +12,7 @@ from onnx import helper, TensorProto
 BASE_DIR = os.path.join(os.path.dirname(__file__), "..", "build")
 
 MODEL_PATH = os.path.join(BASE_DIR, "score_model.onnx")
-VEC_AFFINE_RELU_MODEL_PATH = os.path.join(BASE_DIR, "vec_affine_relu.onnx")
+AFFINE_RELU_MODEL_PATH = os.path.join(BASE_DIR, "affine_relu.onnx")
 MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "matmul.onnx")
 CHAINED_TENSOR_MODEL_PATH = os.path.join(BASE_DIR, "chained_tensor_math.onnx")
 BATCHED_MATMUL_MODEL_PATH = os.path.join(BASE_DIR, "batched_matmul.onnx")
@@ -103,10 +103,10 @@ def build_score_model(path: str = MODEL_PATH):
 
 
 
-def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int = 4):
-    """Vector model: y = relu((a * x + b) * w), with vector inputs x, b of
-    shape [n], a scalar input a, and a constant vector w that repeats
-    [7, 2, 3, 5] to length n."""
+def build_affine_relu_model(path: str = AFFINE_RELU_MODEL_PATH, n: int = 4):
+    """Rank-1 model: y = relu((a * x + b) * w), with tensor inputs x, b of
+    shape [n], a scalar input a, and a weight w that repeats [7, 2, 3, 5] to
+    length n. `a * x` broadcasts the scalar over the tensor."""
 
     # ------------------------------------------------------------
     # Constant initializers
@@ -114,7 +114,7 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
     w_init = helper.make_tensor("w", TensorProto.INT32, [n], ([7, 2, 3, 5] * n)[:n])
 
     # ------------------------------------------------------------
-    # Inputs / Output  (all vector-shaped: [n])
+    # Inputs / Output  (x, b and y have shape [n]; a is a scalar)
     # ------------------------------------------------------------
     x = helper.make_tensor_value_info("x", TensorProto.INT32, [n])
     a = helper.make_tensor_value_info("a", TensorProto.INT32, [])
@@ -131,7 +131,7 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
         # t = s + b
         helper.make_node("Add", ["s", "b"], ["t"], name="add_b"),
 
-        #p = t*w (vec mul)
+        # p = t * w
         helper.make_node("Mul", ["t","w"], ["p"], name="mul_tw"),
 
         # y = relu(p)
@@ -142,7 +142,7 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
 
     graph = helper.make_graph(
         nodes=nodes,
-        name="VecAffineReluGraph",
+        name="AffineReluGraph",
         inputs=[x, a, b],
         outputs=[y],
         initializer=[w_init]
@@ -151,7 +151,7 @@ def build_vec_affine_relu_model(path: str = VEC_AFFINE_RELU_MODEL_PATH, n: int =
     model = helper.make_model(
         graph,
         opset_imports=[helper.make_opsetid("", 13)],
-        producer_name="vec_affine_relu_builder",
+        producer_name="affine_relu_builder",
     )
 
     _save(model, path)
@@ -311,7 +311,7 @@ def build_dense_layer_model(path: str = DENSE_LAYER_MODEL_PATH, m: int = 4, k: i
 
 if __name__ == "__main__":
     build_score_model()
-    build_vec_affine_relu_model()
+    build_affine_relu_model()
     build_matmul_model()
     build_chained_tensor_model()
     build_batched_matmul_model()

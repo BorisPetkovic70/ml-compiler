@@ -22,7 +22,7 @@ run() {
 run score_model.onnx 25
 
 # x = [1 2 3 4], a = 3, b = [-100 -5 0 2]: relu((a*x + b) * [7 2 3 5]) = [0, 2, 27, 70]
-run vec_affine_relu.onnx 1 2 3 4  3  -100 -5 0 2
+run affine_relu.onnx 1 2 3 4  3  -100 -5 0 2
 
 # A = 1..16, B = identity: A @ B = A
 run matmul.onnx $(seq 1 16) $IDENTITY_4X4
