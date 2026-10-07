@@ -235,10 +235,6 @@ _KERNELS = {
     "hc.pow": _pow,
     "hc.max": _select("sgt"),  # signed greater-than
     "hc.min": _select("slt"),  # signed less-than
-    "hc.add_tensor": _add,
-    "hc.sub_tensor": _sub,
-    "hc.mul_tensor": _mul,
-    "hc.relu_tensor": _relu,
 }
 
 

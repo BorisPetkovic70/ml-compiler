@@ -8,12 +8,11 @@ from xdsl.dialects.builtin import IntegerType, TensorType
 from conftest import tensor_ty, const_i32
 from hc_dialect import (
     HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,
-    HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,
+    HCMatmul,
     broadcast_shape,
 )
 
 BINOPS = [HCAdd, HCMul, HCSub, HCPow, HCMax, HCMin]
-TENSOR_BINOPS = [HCAddTensor, HCSubTensor, HCMulTensor]
 
 
 @pytest.mark.parametrize("op_cls", BINOPS)
@@ -68,13 +67,6 @@ def test_relu_constructs():
     op.verify()
 
 
-def test_relu_constructs_on_a_tensor():
-    blk = Block(arg_types=[tensor_ty(2, 3)])
-    (x,) = blk.args
-    op = HCRelu(operands=[x], result_types=[tensor_ty(2, 3)])
-    op.verify()
-
-
 def test_relu_rejects_result_type_mismatch():
     x = const_i32(5)
     op = HCRelu(operands=[x.result], result_types=[IntegerType(16)])
@@ -82,7 +74,7 @@ def test_relu_rejects_result_type_mismatch():
         op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_constructs(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 3)])
     a, b = blk.args
@@ -90,7 +82,7 @@ def test_tensor_binop_constructs(op_cls):
     op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_constructs_rank_1(op_cls):
     blk = Block(arg_types=[tensor_ty(4), tensor_ty(4)])
     a, b = blk.args
@@ -98,7 +90,7 @@ def test_tensor_binop_constructs_rank_1(op_cls):
     op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_rejects_mismatched_shapes(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 4)])
     a, b = blk.args
@@ -107,17 +99,17 @@ def test_tensor_binop_rejects_mismatched_shapes(op_cls):
         op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_rejects_mismatched_result_type(op_cls):
     """The operands broadcast to 2x3, but the result is declared 2x4."""
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 3)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 4)])
-    with pytest.raises(ValueError, match="result shape must be"):
+    with pytest.raises(ValueError, match="result type must be"):
         op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_constructs_batched(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3, 4), tensor_ty(2, 3, 4)])
     a, b = blk.args
@@ -125,7 +117,7 @@ def test_tensor_binop_constructs_batched(op_cls):
     op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_rejects_mismatched_batch_dim(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3, 4), tensor_ty(5, 3, 4)])
     a, b = blk.args
@@ -150,15 +142,7 @@ def test_broadcast_shape_rejects_unequal_dims():
         broadcast_shape([2, 3], [4])
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
-def test_tensor_binop_constructs_with_broadcast(op_cls):
-    blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(3)])
-    a, b = blk.args
-    op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3)])
-    op.verify()
-
-
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_constructs_with_scalar_operand(op_cls):
     blk = Block(arg_types=[IntegerType(32), tensor_ty(2, 3)])
     s, t = blk.args
@@ -166,7 +150,7 @@ def test_tensor_binop_constructs_with_scalar_operand(op_cls):
     op.verify()
 
 
-@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+@pytest.mark.parametrize("op_cls", BINOPS)
 def test_tensor_binop_rejects_rank_0_operand(op_cls):
     """`tensor<i32>` has no dim to loop over; a single value is an `i32`."""
     blk = Block(arg_types=[tensor_ty(), tensor_ty()])
@@ -179,36 +163,36 @@ def test_tensor_binop_rejects_rank_0_operand(op_cls):
 def test_relu_tensor_constructs():
     blk = Block(arg_types=[tensor_ty(2, 3)])
     (x,) = blk.args
-    op = HCReluTensor(operands=[x], result_types=[tensor_ty(2, 3)])
+    op = HCRelu(operands=[x], result_types=[tensor_ty(2, 3)])
     op.verify()
 
 
 def test_relu_tensor_constructs_rank_1():
     blk = Block(arg_types=[tensor_ty(4)])
     (x,) = blk.args
-    op = HCReluTensor(operands=[x], result_types=[tensor_ty(4)])
+    op = HCRelu(operands=[x], result_types=[tensor_ty(4)])
     op.verify()
 
 
 def test_relu_tensor_rejects_result_type_mismatch():
     blk = Block(arg_types=[tensor_ty(2, 3)])
     (x,) = blk.args
-    op = HCReluTensor(operands=[x], result_types=[tensor_ty(2, 4)])
-    with pytest.raises(ValueError, match="match operand tensor type"):
+    op = HCRelu(operands=[x], result_types=[tensor_ty(2, 4)])
+    with pytest.raises(ValueError, match="result type must be"):
         op.verify()
 
 
 def test_relu_tensor_constructs_batched():
     blk = Block(arg_types=[tensor_ty(2, 3, 4)])
     (x,) = blk.args
-    op = HCReluTensor(operands=[x], result_types=[tensor_ty(2, 3, 4)])
+    op = HCRelu(operands=[x], result_types=[tensor_ty(2, 3, 4)])
     op.verify()
 
 
 def test_relu_tensor_rejects_rank_0_operand():
     blk = Block(arg_types=[tensor_ty()])
     (x,) = blk.args
-    op = HCReluTensor(operands=[x], result_types=[tensor_ty()])
+    op = HCRelu(operands=[x], result_types=[tensor_ty()])
     with pytest.raises(ValueError, match="rank >= 1"):
         op.verify()
 

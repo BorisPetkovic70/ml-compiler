@@ -38,13 +38,13 @@ def value_type(shape) -> str:
     ("hc.max", "i32", 3, 9, 9),
     ("hc.min", "i32", 3, 9, 3),
     ("hc.pow", "i32", -2, 3, -8),
-    ("hc.add_tensor", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[10, 20], [30, 40]], [[11, 22], [33, 44]]),
-    ("hc.sub_tensor", "tensor<2x2xi32>", [[10, 20], [30, 40]], [[1, 2], [3, 4]], [[9, 18], [27, 36]]),
-    ("hc.mul_tensor", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[2, 3], [4, 5]], [[2, 6], [12, 20]]),
+    ("hc.add", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[10, 20], [30, 40]], [[11, 22], [33, 44]]),
+    ("hc.sub", "tensor<2x2xi32>", [[10, 20], [30, 40]], [[1, 2], [3, 4]], [[9, 18], [27, 36]]),
+    ("hc.mul", "tensor<2x2xi32>", [[1, 2], [3, 4]], [[2, 3], [4, 5]], [[2, 6], [12, 20]]),
     # rank 1: a single loop
-    ("hc.add_tensor", "tensor<4xi32>", [1, 2, 3, 4], [10, 20, 30, 40], [11, 22, 33, 44]),
+    ("hc.add", "tensor<4xi32>", [1, 2, 3, 4], [10, 20, 30, 40], [11, 22, 33, 44]),
     # batched: the lowering wraps the row/column nest in a loop over the leading dim
-    ("hc.add_tensor", "tensor<2x2x2xi32>",
+    ("hc.add", "tensor<2x2x2xi32>",
      [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
      [[[10, 20], [30, 40]], [[50, 60], [70, 80]]],
      [[[11, 22], [33, 44]], [[55, 66], [77, 88]]]),
@@ -73,7 +73,7 @@ def test_broadcast_matches_numpy(a_shape, b_shape):
     a_ty, b_ty, r_ty = value_type(a_shape), value_type(b_shape), tensor_type(r.shape)
     check_oracle(f"""
     func.func @f(%a: {a_ty}, %b: {b_ty}) -> {r_ty} {{
-      %r = "hc.sub_tensor"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
+      %r = "hc.sub"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
       func.return %r : {r_ty}
     }}""", [a.tolist(), b.tolist()], r.tolist())
 
@@ -97,7 +97,6 @@ def test_max_min_pow_on_tensors_match_numpy(op, reference):
 @pytest.mark.parametrize("op,ty,x,expected", [
     ("hc.relu", "i32", -3, 0),
     ("hc.relu", "tensor<2x2xi32>", [[-1, 2], [3, -4]], [[0, 2], [3, 0]]),
-    ("hc.relu_tensor", "tensor<2x2xi32>", [[-1, 2], [3, -4]], [[0, 2], [3, 0]]),
 ])
 def test_relu(op, ty, x, expected):
     check_oracle(f"""
@@ -157,7 +156,7 @@ def test_matmul_then_relu_matches_numpy():
     check_oracle("""
     func.func @f(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
       %m = "hc.matmul"(%a, %b) : (tensor<2x3xi32>, tensor<3x4xi32>) -> tensor<2x4xi32>
-      %r = "hc.relu_tensor"(%m) : (tensor<2x4xi32>) -> tensor<2x4xi32>
+      %r = "hc.relu"(%m) : (tensor<2x4xi32>) -> tensor<2x4xi32>
       func.return %r : tensor<2x4xi32>
     }""", [a.tolist(), b.tolist()], np.maximum(a @ b, 0).tolist())
 

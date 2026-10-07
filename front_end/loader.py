@@ -7,13 +7,12 @@ and a runtime input of the same shape get the same type. A value that isn't
 INT32, has rank 4 or more, or has a dim without a known positive size is
 rejected (`_check_value`).
 
-Each node picks its hc op variant (scalar or `*_tensor`) from the types of
-the operands it receives. `Add`, `Sub` and `Mul` take the tensor variant when
-either operand is a tensor; its result type is the shape the operands
-broadcast to (`broadcast_shape`), so the other operand may be a scalar, have
-a lower rank, or have dims of size 1. `Pow`, `Max` and `Min` have one op each,
-whose result type follows the same rule. The op is verified as it is built,
-so operands that don't fit are rejected with the node's name.
+Each ONNX node maps to one hc op, whatever the ranks of its operands
+(`_BINARY_OPS`, `MatMul`, `Relu`). The result type of a binary element-wise
+node is the type its operands broadcast to (`broadcast_shape`): `i32` for two
+scalars, else a tensor. So an operand may be a scalar, have a lower rank, or
+have dims of size 1. The op is verified as it is built, so operands that
+don't fit are rejected with the node's name.
 """
 import onnx
 from xdsl.dialects import func, arith, builtin
@@ -24,8 +23,14 @@ from xdsl.ir import Region, Block
 from xdsl.utils.exceptions import VerifyException
 
 from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
-from hc_dialect import HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor
+from hc_dialect import HCMatmul
 from hc_dialect import broadcast_shape, shape_of
+
+# The hc op of each binary element-wise ONNX op_type.
+_BINARY_OPS = {
+    "Add": HCAdd, "Sub": HCSub, "Mul": HCMul,
+    "Pow": HCPow, "Max": HCMax, "Min": HCMin,
+}
 
 # --------------------------------------
 #  Helper functions
@@ -71,10 +76,6 @@ def _const_op_from_tensor(tensor_proto, name: str) -> arith.ConstantOp:
     values = [int(v) for v in arr.reshape(-1).tolist()]
     dense = builtin.DenseIntOrFPElementsAttr.from_list(ty, values)
     return arith.ConstantOp(dense)
-
-
-def _is_tensor(value) -> bool:
-    return isinstance(value.type, builtin.TensorType)
 
 
 def _dim_as_int(int_attr) -> int:
@@ -165,35 +166,11 @@ def import_onnx_to_hc_module(
                 ) from e
             return builtin.TensorType(i32, shape) if shape else i32
 
-        if node.op_type == "Add":
+        if node.op_type in _BINARY_OPS:
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_tensor(a) or _is_tensor(b):
-                hc_cls, res_ty = HCAddTensor, broadcast_type(a, b)
-            else:
-                hc_cls, res_ty = HCAdd, a.type
-            hc = hc_cls(operands=[a, b], result_types=[res_ty])
-            emit(hc)
-            continue
-
-        if node.op_type == "Sub":
-            a = get(node.input[0])
-            b = get(node.input[1])
-            if _is_tensor(a) or _is_tensor(b):
-                hc_cls, res_ty = HCSubTensor, broadcast_type(a, b)
-            else:
-                hc_cls, res_ty = HCSub, a.type
-            hc = hc_cls(operands=[a, b], result_types=[res_ty])
-            emit(hc)
-            continue
-
-        if node.op_type == "Mul":
-            a = get(node.input[0])
-            b = get(node.input[1])
-            if _is_tensor(a) or _is_tensor(b):
-                hc = HCMulTensor(operands=[a, b], result_types=[broadcast_type(a, b)])
-            else:
-                hc = HCMul(operands=[a, b], result_types=[i32])
+            hc_cls = _BINARY_OPS[node.op_type]
+            hc = hc_cls(operands=[a, b], result_types=[broadcast_type(a, b)])
             emit(hc)
             continue
 
@@ -211,30 +188,8 @@ def import_onnx_to_hc_module(
 
         if node.op_type == "Relu":
             x = get(node.input[0])
-            hc_cls = HCReluTensor if _is_tensor(x) else HCRelu
-            hc = hc_cls(operands=[x], result_types=[x.type])
+            hc = HCRelu(operands=[x], result_types=[x.type])
             emit(hc)
-            continue
-
-        if node.op_type == "Pow":
-            a = get(node.input[0])
-            b = get(node.input[1])
-            hc_pow = HCPow(operands=[a, b], result_types=[broadcast_type(a, b)])
-            emit(hc_pow)
-            continue
-
-        if node.op_type == "Max":
-            a = get(node.input[0])
-            b = get(node.input[1])
-            hc_max = HCMax(operands=[a, b], result_types=[broadcast_type(a, b)])
-            emit(hc_max)
-            continue
-
-        if node.op_type == "Min":
-            a = get(node.input[0])
-            b = get(node.input[1])
-            hc_min = HCMin(operands=[a, b], result_types=[broadcast_type(a, b)])
-            emit(hc_min)
             continue
 
         raise NotImplementedError(f"Unsupported ONNX op: {node.op_type}")

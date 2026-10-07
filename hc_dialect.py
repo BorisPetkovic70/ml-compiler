@@ -3,9 +3,8 @@
 `hc.add/sub/mul/max/min/pow/relu` are element-wise. An operand is an integer
 or a tensor of rank >= 1, and the binary ops broadcast their operands with
 NumPy's rules (`broadcast_shape`). The result is an integer when every
-operand is, else a tensor. `hc.add_tensor/sub_tensor/mul_tensor/relu_tensor`
-are the same ops with a tensor result only. `hc.matmul` accepts rank 2, or
-rank 3 with a leading batch dim.
+operand is, else a tensor. `hc.matmul` accepts rank 2, or rank 3 with a
+leading batch dim.
 
 `TensorInt` constrains only the element type. Every rule relating the types
 or shapes of an op's operands and result is enforced by that op's
@@ -233,94 +232,13 @@ class HCMatmul(IRDLOperation):
 
 
 # -----------------------------
-# Element-wise operations with a tensor result only
-# -----------------------------
-def _verify_broadcast_binop(op: IRDLOperation):
-    """Requires each operand to be an integer or a tensor of rank >= 1, at
-    least one of them a tensor, and res to be a tensor of the operands'
-    broadcast shape. Operands and result share one element type."""
-    lhs_t, rhs_t, res_t = op.lhs.type, op.rhs.type, op.res.type
-    tensors = [t for t in (lhs_t, rhs_t) if isinstance(t, TensorType)]
-    if not tensors:
-        raise ValueError(
-            f"{op.name}: at least one operand must be a tensor, got {lhs_t} and {rhs_t}"
-        )
-    for t in tensors:
-        if len(t.shape) < 1:
-            raise ValueError(f"{op.name}: operands must have rank >= 1, got {t}")
-    for t in (lhs_t, rhs_t):
-        elem_t = t.element_type if isinstance(t, TensorType) else t
-        if elem_t != res_t.element_type:
-            raise ValueError(
-                f"{op.name}: operands and result must share the same element type, "
-                f"got lhs={lhs_t}, rhs={rhs_t}, res={res_t}"
-            )
-    shape = broadcast_shape(shape_of(lhs_t), shape_of(rhs_t))
-    if shape_of(res_t) != shape:
-        raise ValueError(f"{op.name}: result shape must be {shape}, got {res_t}")
-
-
-@irdl_op_definition
-class HCAddTensor(IRDLOperation):
-    """Element-wise lhs + rhs -> tensor, with broadcasting."""
-    name = "hc.add_tensor"
-    lhs = operand_def(ScalarOrTensorInt)
-    rhs = operand_def(ScalarOrTensorInt)
-    res = result_def(TensorInt)
-
-    def verify_(self):
-        _verify_broadcast_binop(self)
-
-
-@irdl_op_definition
-class HCSubTensor(IRDLOperation):
-    """Element-wise lhs - rhs -> tensor, with broadcasting."""
-    name = "hc.sub_tensor"
-    lhs = operand_def(ScalarOrTensorInt)
-    rhs = operand_def(ScalarOrTensorInt)
-    res = result_def(TensorInt)
-
-    def verify_(self):
-        _verify_broadcast_binop(self)
-
-
-@irdl_op_definition
-class HCMulTensor(IRDLOperation):
-    """Element-wise lhs * rhs -> tensor, with broadcasting."""
-    name = "hc.mul_tensor"
-    lhs = operand_def(ScalarOrTensorInt)
-    rhs = operand_def(ScalarOrTensorInt)
-    res = result_def(TensorInt)
-
-    def verify_(self):
-        _verify_broadcast_binop(self)
-
-
-@irdl_op_definition
-class HCReluTensor(IRDLOperation):
-    """Element-wise max(x, 0) over a tensor."""
-    name = "hc.relu_tensor"
-    x = operand_def(TensorInt)
-    res = result_def(TensorInt)
-
-    def verify_(self):
-        if len(self.x.type.shape) < 1:
-            raise ValueError(f"hc.relu_tensor: operand must have rank >= 1, got {self.x.type}")
-        if self.res.type != self.x.type:
-            raise ValueError(
-                f"hc.relu_tensor: result must match operand tensor type, "
-                f"got res={self.res.type}, x={self.x.type}"
-            )
-
-
-# -----------------------------
 # Dialect: HiCompiler
 # -----------------------------
 HiCompiler = Dialect(
     "hc",
     (
         HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,   # element-wise ops
-        HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,  # tensor-only ops
+        HCMatmul,
     ),
     (),  # attrs
 )

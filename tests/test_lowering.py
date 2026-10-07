@@ -75,8 +75,7 @@ def test_pow():
 
 
 @pytest.mark.parametrize("hc_op,arith_op", [
-    ("hc.add_tensor", "arith.addi"), ("hc.sub_tensor", "arith.subi"),
-    ("hc.mul_tensor", "arith.muli"),
+    ("hc.add", "arith.addi"), ("hc.sub", "arith.subi"), ("hc.mul", "arith.muli"),
 ])
 def test_tensor_binop(hc_op, arith_op):
     """One loop per dim: the i/j nest threads the result tensor through
@@ -107,7 +106,7 @@ def test_tensor_binop_rank_1():
     """A rank-1 tensor needs a single loop and a single index."""
     check_lowering("""
     func.func @f(%a: tensor<4xi32>, %b: tensor<4xi32>) -> tensor<4xi32> {
-      %r = "hc.add_tensor"(%a, %b) : (tensor<4xi32>, tensor<4xi32>) -> tensor<4xi32>
+      %r = "hc.add"(%a, %b) : (tensor<4xi32>, tensor<4xi32>) -> tensor<4xi32>
       func.return %r : tensor<4xi32>
     }""", """
     // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
@@ -130,7 +129,7 @@ def test_broadcast_aligns_operands_at_the_last_dim():
     indexed by the inner induction variable only."""
     check_lowering("""
     func.func @f(%a: tensor<2x3xi32>, %b: tensor<3xi32>) -> tensor<2x3xi32> {
-      %r = "hc.add_tensor"(%a, %b) : (tensor<2x3xi32>, tensor<3xi32>) -> tensor<2x3xi32>
+      %r = "hc.add"(%a, %b) : (tensor<2x3xi32>, tensor<3xi32>) -> tensor<2x3xi32>
       func.return %r : tensor<2x3xi32>
     }""", """
     // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
@@ -147,7 +146,7 @@ def test_broadcast_reads_a_size_1_dim_at_index_0():
     0 of `%b`."""
     check_lowering("""
     func.func @f(%a: tensor<2x3xi32>, %b: tensor<2x1xi32>) -> tensor<2x3xi32> {
-      %r = "hc.add_tensor"(%a, %b) : (tensor<2x3xi32>, tensor<2x1xi32>) -> tensor<2x3xi32>
+      %r = "hc.add"(%a, %b) : (tensor<2x3xi32>, tensor<2x1xi32>) -> tensor<2x3xi32>
       func.return %r : tensor<2x3xi32>
     }""", """
     // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
@@ -164,7 +163,7 @@ def test_broadcast_uses_a_scalar_operand_directly():
     """A scalar has nothing to index: `%s` goes straight into the multiply."""
     check_lowering("""
     func.func @f(%s: i32, %a: tensor<2x3xi32>) -> tensor<2x3xi32> {
-      %r = "hc.mul_tensor"(%s, %a) : (i32, tensor<2x3xi32>) -> tensor<2x3xi32>
+      %r = "hc.mul"(%s, %a) : (i32, tensor<2x3xi32>) -> tensor<2x3xi32>
       func.return %r : tensor<2x3xi32>
     }""", """
     // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
@@ -201,7 +200,7 @@ def test_equal_loop_bounds_share_one_constant():
     constant."""
     check_lowering("""
     func.func @f(%x: tensor<2x2xi32>) -> tensor<2x2xi32> {
-      %r = "hc.relu_tensor"(%x) : (tensor<2x2xi32>) -> tensor<2x2xi32>
+      %r = "hc.relu"(%x) : (tensor<2x2xi32>) -> tensor<2x2xi32>
       func.return %r : tensor<2x2xi32>
     }""", """
     // CHECK: %[[N:.*]] = arith.constant 2 : index
@@ -214,7 +213,7 @@ def test_equal_loop_bounds_share_one_constant():
 def test_relu_tensor():
     check_lowering("""
     func.func @f(%x: tensor<2x3xi32>) -> tensor<2x3xi32> {
-      %r = "hc.relu_tensor"(%x) : (tensor<2x3xi32>) -> tensor<2x3xi32>
+      %r = "hc.relu"(%x) : (tensor<2x3xi32>) -> tensor<2x3xi32>
       func.return %r : tensor<2x3xi32>
     }""", """
     // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
