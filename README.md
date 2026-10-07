@@ -6,11 +6,10 @@ dialects, and compiles it to an executable with LLVM. A pure-Python interpreter 
 IR at every stage and is the test suite's correctness oracle.
 
 **Supported:** ONNX `Add`, `Sub`, `Mul`, `MatMul`, `Relu`, `Pow`, `Max`, `Min`, `Constant`;
-initializers (weights); `int32` only; one model output. Rank-0 values are scalars, ranks 1-3
-tensors (`MatMul` takes rank 2, or rank 3 with one leading batch dim).
+initializers (weights); `int32` only; one model output. Rank-0 values are scalars, values of
+any higher rank tensors (`MatMul` takes rank 2, or rank 3 with one leading batch dim).
 `Add`/`Sub`/`Mul`/`Pow`/`Max`/`Min` broadcast by NumPy's rules: a tensor with a scalar or with
-another tensor (`[M,N] + [N]`). The loader rejects other element types, rank 4+ and symbolic
-dims.
+another tensor (`[M,N] + [N]`). The loader rejects other element types and symbolic dims.
 
 ```
 ONNX ─▶ front_end/loader.py ─▶ hc.* ─▶ middle_end/pipeline.py ─▶ back_end/harness_gen.py ─▶ back_end/back_end.sh

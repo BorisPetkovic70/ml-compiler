@@ -176,6 +176,30 @@ def test_weight_initializer_compiles_and_matches_numpy(tmp_path):
     assert actual == (x @ w).tolist()
 
 
+def test_rank_4_tensor_compiles_and_matches_numpy(tmp_path):
+    """Y = relu(A - B), with A of shape 2x3x2x2 and B of shape 2x2. The loop
+    nest, the memref descriptor and the harness all follow the rank."""
+    np = pytest.importorskip("numpy")
+    from onnx import TensorProto, helper, save
+
+    rng = np.random.default_rng(seed=7)
+    a = rng.integers(-5, 6, size=(2, 3, 2, 2))
+    b = rng.integers(-5, 6, size=(2, 2))
+    graph = helper.make_graph(
+        [helper.make_node("Sub", ["a", "b"], ["t"]), helper.make_node("Relu", ["t"], ["y"])],
+        "rank_4",
+        [helper.make_tensor_value_info("a", TensorProto.INT32, list(a.shape)),
+         helper.make_tensor_value_info("b", TensorProto.INT32, list(b.shape))],
+        [helper.make_tensor_value_info("y", TensorProto.INT32, list(a.shape))],
+    )
+    onnx_path = tmp_path / "rank_4.onnx"
+    save(helper.make_model(graph), str(onnx_path))
+
+    args = [*a.flatten().tolist(), *b.flatten().tolist()]
+    stdout = _compile_and_run(tmp_path, onnx_path, args)
+    assert _parse_ints(stdout) == np.maximum(a - b, 0).flatten().tolist()
+
+
 def test_model_returning_its_input_frees_each_buffer_once(tmp_path):
     """The graph's output is its input. The harness frees both the result and
     its own input buffer, so the result must be a separate copy."""

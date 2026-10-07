@@ -83,6 +83,20 @@ def test_rank_1_memref():
     """)
 
 
+def test_rank_4_memref():
+    """The descriptor follows the rank. Each stride is the product of the
+    sizes after it: 3*4*5, 4*5, 5, 1."""
+    filecheck(harness("""
+    func.func @my_func(%t: memref<2x3x4x5xi32>) -> memref<2x3x4x5xi32> {
+      func.return %t : memref<2x3x4x5xi32>
+    }"""), """
+    // CHECK: int64_t sizes[4];
+    // CHECK-NEXT: int64_t strides[4];
+    // CHECK-NEXT: } MemRef4D_i32;
+    // CHECK: MemRef4D_i32 a0 = { a0_data, a0_data, 0, {2, 3, 4, 5}, {60, 20, 5, 1} };
+    """)
+
+
 def test_refuses_multi_output_function():
     """Both calling conventions assume one result, so a second one would be
     silently dropped."""

@@ -1,5 +1,5 @@
 """ONNX -> hc op mapping: given the declared input shapes (scalar [], or a
-tensor of rank 1 to 3), each ONNX op_type maps to one hc op.
+tensor of rank 1 or more), each ONNX op_type maps to one hc op.
 """
 import pytest
 
@@ -38,6 +38,7 @@ def _save_one_node_model(tmp_path, op_type, input_specs, output_shape, name="f")
     ("Relu", [2, 3], "hc.relu"),
     ("Mul", [2, 3], "hc.mul"),
     ("Add", [2, 3, 4], "hc.add"),
+    ("Add", [2, 3, 4, 5], "hc.add"),
 ])
 def test_node_maps_to_the_same_op_for_every_shape(tmp_path, ctx, op_type, shape, expected_hc_op):
     if op_type == "Relu":

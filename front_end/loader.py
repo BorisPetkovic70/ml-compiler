@@ -1,11 +1,11 @@
 """Imports an ONNX graph as an `hc` module with one `func.func`.
 
-Types come from ONNX shapes: rank 0 -> i32, rank 1 to 3 -> TensorType. Graph
+Types come from ONNX shapes: rank 0 -> i32, rank 1 or more -> TensorType. Graph
 inputs use their declared shape (`_type_from_value_info`); initializers and
 `Constant` nodes use the same rule (`_const_op_from_tensor`), so a constant
 and a runtime input of the same shape get the same type. A value that isn't
-INT32, has rank 4 or more, or has a dim without a known positive size is
-rejected (`_check_value`).
+INT32, or has a dim without a known positive size, is rejected
+(`_check_value`).
 
 Each ONNX node maps to one hc op, whatever the ranks of its operands
 (`_BINARY_OPS`, `MatMul`, `Relu`). The result type of a binary element-wise
@@ -38,15 +38,11 @@ _BINARY_OPS = {
 
 def _check_value(name: str, elem_type: int, dims: list) -> None:
     """Raises NotImplementedError unless the ONNX value `name` is INT32 with
-    rank 0-3 and every dim a known positive size."""
+    every dim a known positive size."""
     if elem_type != onnx.TensorProto.INT32:
         raise NotImplementedError(
             f"ONNX value {name!r}: element type "
             f"{onnx.TensorProto.DataType.Name(elem_type)}, only INT32 is supported"
-        )
-    if len(dims) > 3:
-        raise NotImplementedError(
-            f"ONNX value {name!r}: rank {len(dims)}, only ranks 0-3 are supported"
         )
     if any(not isinstance(d, int) or d <= 0 for d in dims):
         raise NotImplementedError(
@@ -91,8 +87,8 @@ def import_onnx_to_hc_module(
     """Loads `onnx_path` and returns a module holding `func.func @fn_name`,
     with one block argument per graph input and a single result.
 
-    Raises NotImplementedError for an unsupported op_type, element type, rank
-    or dim, or operand types the node's hc op rejects; ValueError for operand
+    Raises NotImplementedError for an unsupported op_type, element type or
+    dim, or operand types the node's hc op rejects; ValueError for operand
     shapes that don't broadcast, a model without exactly one output or a
     `Constant` node without a `value` attribute, and KeyError when a node
     reads a value that is not yet defined.

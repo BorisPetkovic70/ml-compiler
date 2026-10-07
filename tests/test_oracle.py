@@ -63,6 +63,7 @@ def test_binary_op(op, ty, a, b, expected):
     ((2, 1), (1, 3)),  # each operand stretches one dim
     ((2, 3), ()),      # tensor - scalar
     ((), (2, 3)),      # scalar - tensor
+    ((2, 3, 2, 2), (2, 2)),  # rank 4: one loop per dim
 ])
 def test_broadcast_matches_numpy(a_shape, b_shape):
     """Subtraction, so swapped operands give a different result."""

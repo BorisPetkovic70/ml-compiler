@@ -131,8 +131,8 @@ def _print_result_lines(out_dims: list[int]) -> list[str]:
 
 
 def _generate_memref_harness(func_name, in_types, out_type) -> str:
-    """Raises RuntimeError for a non-memref result, a memref that isn't
-    rank 1-3, or an element type that isn't i8/i16/i32/i64."""
+    """Raises RuntimeError for a non-memref result, a rank-0 memref, or an
+    element type that isn't i8/i16/i32/i64."""
     if not isinstance(out_type, MemRefType):
         raise RuntimeError(
             "harness generator: a memref-taking function must also return a memref "
@@ -141,11 +141,8 @@ def _generate_memref_harness(func_name, in_types, out_type) -> str:
 
     memref_types = [t for t in in_types if isinstance(t, MemRefType)] + [out_type]
     for t in memref_types:
-        if len(_memref_dims(t)) not in (1, 2, 3):
-            raise RuntimeError(
-                f"harness generator: only rank-1, rank-2, and rank-3 (batched) "
-                f"memrefs are supported, got {t}"
-            )
+        if not _memref_dims(t):
+            raise RuntimeError(f"harness generator: a memref must have rank >= 1, got {t}")
 
     lines = ["#include <stdio.h>", "#include <stdlib.h>", "#include <stdint.h>", ""]
 

@@ -229,7 +229,7 @@ between two conventions:
 
 Because bufferization changes a tensor signature into a memref one, the harness is generated
 *after* the middle end. The generator raises an error for any signature it doesn't model: a
-type other than an integer or a memref, a memref of rank 0 or ≥4, a non-`i8/16/32/64` element
+type other than an integer or a memref, a memref of rank 0, a non-`i8/16/32/64` element
 type, or a memref argument with a non-memref result.
 
 Weights (`memref.global`) live in the executable's read-only data. clang links a
@@ -278,9 +278,9 @@ harness's format, and the script fails unless the executable prints the same tex
 Each limit below exists because no current workload needs it, not by accident.
 
 - **`i32` only.** The loader rejects any ONNX element type other than `INT32`.
-- **Shapes:** rank 0 (scalar) and ranks 1–3 (tensor), with every dim a known positive size.
-  The loader rejects anything else (rank 4+, symbolic dims). `hc.matmul` takes rank 2, or
-  rank 3 with one leading batch dim.
+- **Shapes:** every dim must be a known positive size; the loader rejects symbolic dims. The
+  element-wise ops take any rank. `hc.matmul` takes rank 2, or rank 3 with one leading batch
+  dim.
 - **`hc.matmul` does not broadcast.** The element-wise ops do (§2), so a bias add
   `[M,N] + [N]` works; `hc.matmul` needs equal batch dims.
 - **One function, one block, one output.** The loader, bufferization and interpreter all
