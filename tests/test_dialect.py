@@ -204,11 +204,11 @@ def test_matmul_constructs():
     op.verify()
 
 
-def test_matmul_rejects_non_rank2_operand():
+def test_matmul_rejects_rank_1_operand():
     blk = Block(arg_types=[TensorType(IntegerType(32), [4]), tensor_ty(6, 8)])
     a, b = blk.args
     op = HCMatmul(operands=[a, b], result_types=[tensor_ty(4, 8)])
-    with pytest.raises(ValueError, match="rank-2, or rank-3"):
+    with pytest.raises(ValueError, match="rank >= 2"):
         op.verify()
 
 
@@ -264,11 +264,9 @@ def test_matmul_rejects_mismatched_ranks():
         op.verify()
 
 
-def test_matmul_rejects_rank_4_operand():
-    blk = Block(arg_types=[
-        TensorType(IntegerType(32), [1, 2, 4, 6]), tensor_ty(2, 6, 8),
-    ])
+def test_matmul_constructs_with_two_batch_dims():
+    """Every dim before the last two is a batch dim."""
+    blk = Block(arg_types=[tensor_ty(2, 3, 4, 6), tensor_ty(2, 3, 6, 8)])
     a, b = blk.args
-    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 4, 8)])
-    with pytest.raises(ValueError, match="rank-2, or rank-3"):
-        op.verify()
+    op = HCMatmul(operands=[a, b], result_types=[tensor_ty(2, 3, 4, 8)])
+    op.verify()

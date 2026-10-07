@@ -230,30 +230,69 @@ def test_relu_tensor():
     """)
 
 
+MATMUL = """
+func.func @f(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
+  %r = "hc.matmul"(%a, %b) : (tensor<2x3xi32>, tensor<3x4xi32>) -> tensor<2x4xi32>
+  func.return %r : tensor<2x4xi32>
+}"""
+
+
+def test_matmul_zero_fills_its_result():
+    """The matmul nest adds to C[i, j], so the result must start at 0. An
+    i/j nest writes a 0 to every element of the `tensor.empty` first."""
+    check_lowering(MATMUL, """
+    // CHECK: %[[INIT:.*]] = tensor.empty() : tensor<2x4xi32>
+    // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[TI:.*]] = %[[INIT]]) -> (tensor<2x4xi32>)
+    // CHECK: scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[TJ:.*]] = %[[TI]]) -> (tensor<2x4xi32>)
+    // CHECK-NEXT: %[[ZERO:.*]] = arith.constant 0 : i32
+    // CHECK-NEXT: %[[T:.*]] = tensor.insert %[[ZERO]] into %[[TJ]][%[[I]], %[[J]]] : tensor<2x4xi32>
+    // CHECK-NEXT: scf.yield %[[T]] : tensor<2x4xi32>
+    """)
+
+
 def test_matmul():
-    """An i/j/k loop nest: the k loop accumulates A[i, k] * B[k, j] in an i32
-    iter_arg, and the j loop inserts the sum at C[i, j]. M, K and N differ so
-    a swapped bound or index shows up."""
-    check_lowering("""
-    func.func @f(%a: tensor<2x3xi32>, %b: tensor<3x4xi32>) -> tensor<2x4xi32> {
-      %r = "hc.matmul"(%a, %b) : (tensor<2x3xi32>, tensor<3x4xi32>) -> tensor<2x4xi32>
-      func.return %r : tensor<2x4xi32>
-    }""", """
+    """A perfect i/j/k nest: every loop carries the result tensor, starting
+    from the zero-filled one, and the body is
+    C[i, j] = C[i, j] + A[i, k] * B[k, j]. M, K and N differ so a swapped
+    bound or index shows up."""
+    check_lowering(MATMUL, """
+    // CHECK: %[[ZEROED:.*]] = scf.for
+    // CHECK: arith.constant 0 : i32
     // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : index
     // CHECK-DAG: %[[C1:.*]] = arith.constant 1 : index
     // CHECK-DAG: %[[M:.*]] = arith.constant 2 : index
     // CHECK-DAG: %[[N:.*]] = arith.constant 4 : index
     // CHECK-DAG: %[[K:.*]] = arith.constant 3 : index
-    // CHECK-DAG: %[[INIT:.*]] = tensor.empty() : tensor<2x4xi32>
-    // CHECK: %[[R:.*]] = scf.for %[[I:.*]] = %[[C0]] to %[[M]] step %[[C1]] iter_args(%[[TI:.*]] = %[[INIT]]) -> (tensor<2x4xi32>)
-    // CHECK: scf.for %[[J:.*]] = %[[C0]] to %[[N]] step %[[C1]] iter_args(%[[TJ:.*]] = %[[TI]]) -> (tensor<2x4xi32>)
-    // CHECK: %[[ZERO:.*]] = arith.constant 0 : i32
-    // CHECK: %[[SUM:.*]] = scf.for %[[KV:.*]] = %[[C0]] to %[[K]] step %[[C1]] iter_args(%[[ACC:.*]] = %[[ZERO]]) -> (i32)
-    // CHECK: %[[X:.*]] = tensor.extract %a[%[[I]], %[[KV]]] : tensor<2x3xi32>
-    // CHECK: %[[Y:.*]] = tensor.extract %b[%[[KV]], %[[J]]] : tensor<3x4xi32>
-    // CHECK: %[[P:.*]] = arith.muli %[[X]], %[[Y]] : i32
-    // CHECK: %[[NEXT:.*]] = arith.addi %[[ACC]], %[[P]] : i32
-    // CHECK: scf.yield %[[NEXT]] : i32
-    // CHECK: tensor.insert %[[SUM]] into %[[TJ]][%[[I]], %[[J]]] : tensor<2x4xi32>
+    // CHECK: %[[R:.*]] = scf.for %[[I:.*]] = %[[C0]] to %[[M]] step %[[C1]] iter_args(%[[TI:.*]] = %[[ZEROED]]) -> (tensor<2x4xi32>)
+    // CHECK-NEXT: scf.for %[[J:.*]] = %[[C0]] to %[[N]] step %[[C1]] iter_args(%[[TJ:.*]] = %[[TI]]) -> (tensor<2x4xi32>)
+    // CHECK-NEXT: scf.for %[[KV:.*]] = %[[C0]] to %[[K]] step %[[C1]] iter_args(%[[TK:.*]] = %[[TJ]]) -> (tensor<2x4xi32>)
+    // CHECK-NEXT: %[[C:.*]] = tensor.extract %[[TK]][%[[I]], %[[J]]] : tensor<2x4xi32>
+    // CHECK-NEXT: %[[X:.*]] = tensor.extract %a[%[[I]], %[[KV]]] : tensor<2x3xi32>
+    // CHECK-NEXT: %[[Y:.*]] = tensor.extract %b[%[[KV]], %[[J]]] : tensor<3x4xi32>
+    // CHECK-NEXT: %[[P:.*]] = arith.muli %[[X]], %[[Y]] : i32
+    // CHECK-NEXT: %[[S:.*]] = arith.addi %[[C]], %[[P]] : i32
+    // CHECK-NEXT: %[[T:.*]] = tensor.insert %[[S]] into %[[TK]][%[[I]], %[[J]]] : tensor<2x4xi32>
+    // CHECK-NEXT: scf.yield %[[T]] : tensor<2x4xi32>
     // CHECK: func.return %[[R]] : tensor<2x4xi32>
+    """)
+
+
+def test_matmul_batch_dims_prefix_every_index():
+    """Two batch dims add two outer loops. Their induction variables come
+    first in every index, before i/k, k/j and i/j."""
+    check_lowering("""
+    func.func @f(%a: tensor<5x6x2x3xi32>, %b: tensor<5x6x3x4xi32>) -> tensor<5x6x2x4xi32> {
+      %r = "hc.matmul"(%a, %b) : (tensor<5x6x2x3xi32>, tensor<5x6x3x4xi32>) -> tensor<5x6x2x4xi32>
+      func.return %r : tensor<5x6x2x4xi32>
+    }""", """
+    // CHECK: arith.constant 0 : i32
+    // CHECK: scf.for %[[B0:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT: scf.for %[[B1:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT: scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT: scf.for %[[K:.*]] = %{{.*}} to %{{.*}} step %{{.*}} iter_args(%[[T:.*]] = %{{.*}}) -> (tensor<5x6x2x4xi32>)
+    // CHECK-NEXT: tensor.extract %[[T]][%[[B0]], %[[B1]], %[[I]], %[[J]]] : tensor<5x6x2x4xi32>
+    // CHECK-NEXT: tensor.extract %a[%[[B0]], %[[B1]], %[[I]], %[[K]]] : tensor<5x6x2x3xi32>
+    // CHECK-NEXT: tensor.extract %b[%[[B0]], %[[B1]], %[[K]], %[[J]]] : tensor<5x6x3x4xi32>
+    // CHECK: tensor.insert %{{.*}} into %[[T]][%[[B0]], %[[B1]], %[[I]], %[[J]]] : tensor<5x6x2x4xi32>
     """)

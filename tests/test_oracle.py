@@ -112,6 +112,7 @@ def test_relu(op, ty, x, expected):
     ((1, 5), (5, 1)),
     ((3, 1), (1, 2)),
     ((2, 2, 3), (2, 3, 4)),  # batched: one matmul per leading index
+    ((2, 3, 2, 3), (2, 3, 3, 4)),  # two batch dims
 ])
 def test_matmul_matches_numpy(a_shape, b_shape):
     rng = np.random.default_rng(0)

@@ -201,19 +201,18 @@ def _memref_copy(src: list, dst: list) -> None:
 
 
 def _matmul(a: list, b: list) -> list:
-    """Reference (MxK) @ (KxN) -> (MxN), deliberately independent of the lowering."""
+    """Reference (MxK) @ (KxN) -> (MxN), deliberately independent of the
+    lowering. Operands with leading batch dims are multiplied one pair of
+    slices at a time."""
+    if _depth(a) > 2:
+        if len(a) != len(b):
+            raise RuntimeError("matmul: batch dimensions do not agree")
+        return [_matmul(a_slice, b_slice) for a_slice, b_slice in zip(a, b)]
     k = len(b)
     n = len(b[0]) if k else 0
     if any(len(row) != k for row in a):
         raise RuntimeError("matmul: inner dimensions do not agree")
     return [[sum(row[x] * b[x][j] for x in range(k)) for j in range(n)] for row in a]
-
-
-def _batched_matmul(a: list, b: list) -> list:
-    """Reference (BxMxK) @ (BxKxN) -> (BxMxN): `_matmul` per batch slice."""
-    if len(a) != len(b):
-        raise RuntimeError("matmul: batch dimensions do not agree")
-    return [_matmul(a_slice, b_slice) for a_slice, b_slice in zip(a, b)]
 
 # -----------------------------
 # Interpreter
@@ -296,8 +295,7 @@ class Interpreter:
 
             if name == "hc.matmul":
                 a, b = op.operands
-                matmul = _batched_matmul if len(a.type.shape) == 3 else _matmul
-                self._set(op.results[0], matmul(self._get(a), self._get(b)))
+                self._set(op.results[0], _matmul(self._get(a), self._get(b)))
                 continue
 
             # --- tensor ops (value semantics: insert returns a new tensor) ---

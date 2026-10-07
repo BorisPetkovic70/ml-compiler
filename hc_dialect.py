@@ -3,8 +3,9 @@
 `hc.add/sub/mul/max/min/pow/relu` are element-wise. An operand is an integer
 or a tensor of rank >= 1, and the binary ops broadcast their operands with
 NumPy's rules (`broadcast_shape`). The result is an integer when every
-operand is, else a tensor. `hc.matmul` accepts rank 2, or rank 3 with a
-leading batch dim.
+operand is, else a tensor. `hc.matmul` multiplies the last two dims of
+tensors of rank >= 2. Any leading batch dims must be equal on both operands:
+it does not broadcast.
 
 `TensorInt` constrains only the element type. Every rule relating the types
 or shapes of an op's operands and result is enforced by that op's
@@ -180,24 +181,22 @@ class HCMin(IRDLOperation):
 # -----------------------------
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
-    """(MxK) @ (KxN) -> (MxN), or batched (BxMxK) @ (BxKxN) -> (BxMxN)."""
+    """(MxK) @ (KxN) -> (MxN) on the last two dims. Any leading batch dims
+    are the same on lhs, rhs and res: (...xMxK) @ (...xKxN) -> (...xMxN)."""
     name = "hc.matmul"
     lhs = operand_def(TensorInt)
     rhs = operand_def(TensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        """Requires lhs/rhs/res to be all rank-2 or all rank-3, share an
-        element type and batch prefix (shape[:-2]), and satisfy
-        MxK @ KxN -> MxN on shape[-2:]."""
+        """Requires lhs/rhs/res to have one rank >= 2, share an element
+        type and batch prefix (shape[:-2]), and satisfy MxK @ KxN -> MxN on
+        shape[-2:]."""
         lhs_t, rhs_t, res_t = self.lhs.type, self.rhs.type, self.res.type
 
         for label, t in (("lhs", lhs_t), ("rhs", rhs_t), ("res", res_t)):
-            if len(t.shape) not in (2, 3):
-                raise ValueError(
-                    f"hc.matmul: {label} must be rank-2, or rank-3 with a leading "
-                    f"batch dim, got {t}"
-                )
+            if len(t.shape) < 2:
+                raise ValueError(f"hc.matmul: {label} must have rank >= 2, got {t}")
         if not len(lhs_t.shape) == len(rhs_t.shape) == len(res_t.shape):
             raise ValueError(
                 f"hc.matmul: lhs/rhs/res must all be the same rank, got "

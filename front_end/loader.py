@@ -74,10 +74,6 @@ def _const_op_from_tensor(tensor_proto, name: str) -> arith.ConstantOp:
     return arith.ConstantOp(dense)
 
 
-def _dim_as_int(int_attr) -> int:
-    return int_attr.data
-
-
 # --------------------------------------
 #  Loader
 # --------------------------------------
@@ -173,8 +169,12 @@ def import_onnx_to_hc_module(
         if node.op_type == "MatMul":
             a = get(node.input[0])
             b = get(node.input[1])
-            a_dims = [_dim_as_int(d) for d in a.type.shape]
-            b_dims = [_dim_as_int(d) for d in b.type.shape]
+            a_dims, b_dims = shape_of(a.type), shape_of(b.type)
+            if len(a_dims) < 2 or len(b_dims) < 2:
+                raise NotImplementedError(
+                    f"ONNX MatMul node {node.name or node.output[0]!r}: operands must "
+                    f"have rank >= 2, got {a.type} and {b.type}"
+                )
             batch, m = a_dims[:-2], a_dims[-2]
             n = b_dims[-1]
             res_ty = builtin.TensorType(i32, batch + [m, n])
