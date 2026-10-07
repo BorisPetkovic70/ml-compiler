@@ -5,7 +5,9 @@
 - `hc.pow` becomes an `scf.for` multiply loop.
 - `hc.max`/`hc.min` become `arith.cmpi` + `scf.if`.
 - Tensor ops become `scf.for` nests over `tensor.extract`/`tensor.insert`
-  (docs/DESIGN.md Section 3).
+  (docs/DESIGN.md Section 3). The binary element-wise ones broadcast: each
+  operand is indexed by the result's induction variables, as far as its own
+  shape reaches (`_broadcast_extract`).
 
 `LowerHCPattern` returns without rewriting for any op whose name is not in its
 dispatch tuple, and also for a listed name that has no branch. A missing
@@ -189,24 +191,51 @@ def _build_matmul_nest(lhs, rhs, res_type: builtin.TensorType):
 # -----------------------------------------------------------------------------
 #  Tensor elementwise lowering helper (add/sub/mul/relu_tensor share this)
 # -----------------------------------------------------------------------------
+def _broadcast_extract(x, ivs, shape: list[int]):
+    """Returns (ops, value) for the element of operand `x` that the result
+    element at `ivs` is computed from. `shape` is the result's shape.
+
+    A scalar operand is that value itself, with no ops. A tensor operand is
+    aligned with the result at the last dim, so it is indexed by the trailing
+    induction variables. Where its dim is 1 and the result's is not, the
+    index is a constant 0: its one element is reused along that dim.
+    """
+    if not isinstance(x.type, builtin.TensorType):
+        return [], x
+    dims = [_as_int(d) for d in x.type.shape]
+    res_dims = shape[-len(dims):]
+    zero = arith.ConstantOp.from_int_and_width(0, builtin.IndexType())
+    indices = [
+        iv if dim == res_dim else zero.result
+        for dim, res_dim, iv in zip(dims, res_dims, ivs[-len(dims):])
+    ]
+    extract = tensor.ExtractOp(x, indices, x.type.element_type)
+    return ([extract] if dims == res_dims else [zero, extract]), extract.result
+
+
 def _build_tensor_elementwise_nest(operands, res_type: builtin.TensorType, compute):
     """Builds a loop nest, one loop per dim of `res_type`, that writes
     `compute` of each element into a new tensor of `res_type`, and returns
     (new_ops, result_value).
 
-    `operands` is [x] for a unary op or [lhs, rhs] for a binary one.
+    `operands` is [x] for a unary op or [lhs, rhs] for a binary one. Each is
+    read with `_broadcast_extract`, so it may be a scalar or a tensor whose
+    shape broadcasts to `res_type`'s.
     `compute(a, b_or_None)` returns (ops, result_value) for one element.
     """
     shape = [_as_int(d) for d in res_type.shape]
-    elem_ty = res_type.element_type
 
     def body(ivs, carried):
-        extracts = [tensor.ExtractOp(x, ivs, elem_ty) for x in operands]
-        a_val = extracts[0].result
-        b_val = extracts[1].result if len(operands) == 2 else None
+        read_ops, values = [], []
+        for x in operands:
+            ops, value = _broadcast_extract(x, ivs, shape)
+            read_ops += ops
+            values.append(value)
+        a_val = values[0]
+        b_val = values[1] if len(operands) == 2 else None
         compute_ops, result_val = compute(a_val, b_val)
         inserted = tensor.InsertOp(result_val, carried, ivs)
-        return [*extracts, *compute_ops, inserted], inserted.result
+        return [*read_ops, *compute_ops, inserted], inserted.result
 
     return _build_nest(shape, res_type, body)
 

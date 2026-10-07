@@ -8,7 +8,7 @@ onnx = pytest.importorskip("onnx")
 from onnx import helper, TensorProto  # noqa: E402
 
 from front_end.loader import import_onnx_to_hc_module  # noqa: E402
-from conftest import entry_op_names  # noqa: E402
+from conftest import entry_op_names, find_op  # noqa: E402
 
 
 def _save_one_node_model(tmp_path, op_type, input_specs, output_shape, name="f"):
@@ -64,6 +64,23 @@ def test_mul_tensor_dispatches_to_mul_tensor(tmp_path, ctx):
     path = _save_one_node_model(tmp_path, "Mul", [("a", [2, 3]), ("b", [2, 3])], [2, 3])
     module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
     assert "hc.mul_tensor" in entry_op_names(module, "my_func")
+
+
+def test_add_result_type_is_the_broadcast_shape(tmp_path, ctx):
+    """1x3 + 2x3 -> 2x3: the result type is not the first operand's."""
+    path = _save_one_node_model(tmp_path, "Add", [("a", [1, 3]), ("b", [2, 3])], [2, 3])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    op = find_op(module, "hc.add_tensor", "my_func")
+    assert [d.data for d in op.results[0].type.shape] == [2, 3]
+    module.verify()
+
+
+def test_mul_scalar_times_tensor_dispatches_to_mul_tensor(tmp_path, ctx):
+    path = _save_one_node_model(tmp_path, "Mul", [("a", []), ("b", [2, 3])], [2, 3])
+    module = import_onnx_to_hc_module(ctx, path, fn_name="my_func")
+    op = find_op(module, "hc.mul_tensor", "my_func")
+    assert [d.data for d in op.results[0].type.shape] == [2, 3]
+    module.verify()
 
 
 def test_multiple_inputs_all_bound_as_block_args(tmp_path, ctx):

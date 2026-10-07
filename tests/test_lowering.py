@@ -164,6 +164,56 @@ def test_tensor_binop_rank_1():
     """)
 
 
+def test_broadcast_aligns_operands_at_the_last_dim():
+    """`%b` has one dim, which lines up with the result's last one, so it is
+    indexed by the inner induction variable only."""
+    check_lowering("""
+    func.func @f(%a: tensor<2x3xi32>, %b: tensor<3xi32>) -> tensor<2x3xi32> {
+      %r = "hc.add_tensor"(%a, %b) : (tensor<2x3xi32>, tensor<3xi32>) -> tensor<2x3xi32>
+      func.return %r : tensor<2x3xi32>
+    }""", """
+    // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK: scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK: %[[X:.*]] = tensor.extract %a[%[[I]], %[[J]]] : tensor<2x3xi32>
+    // CHECK: %[[Y:.*]] = tensor.extract %b[%[[J]]] : tensor<3xi32>
+    // CHECK: %[[Z:.*]] = arith.addi %[[X]], %[[Y]] : i32
+    // CHECK: tensor.insert %[[Z]] into %{{.*}}[%[[I]], %[[J]]] : tensor<2x3xi32>
+    """)
+
+
+def test_broadcast_reads_a_size_1_dim_at_index_0():
+    """`%b` has one column and the result three, so every `j` reads column
+    0 of `%b`."""
+    check_lowering("""
+    func.func @f(%a: tensor<2x3xi32>, %b: tensor<2x1xi32>) -> tensor<2x3xi32> {
+      %r = "hc.add_tensor"(%a, %b) : (tensor<2x3xi32>, tensor<2x1xi32>) -> tensor<2x3xi32>
+      func.return %r : tensor<2x3xi32>
+    }""", """
+    // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK: scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK: %[[X:.*]] = tensor.extract %a[%[[I]], %[[J]]] : tensor<2x3xi32>
+    // CHECK: %[[ZERO:.*]] = arith.constant 0 : index
+    // CHECK: %[[Y:.*]] = tensor.extract %b[%[[I]], %[[ZERO]]] : tensor<2x1xi32>
+    // CHECK: %[[Z:.*]] = arith.addi %[[X]], %[[Y]] : i32
+    // CHECK: tensor.insert %[[Z]] into %{{.*}}[%[[I]], %[[J]]] : tensor<2x3xi32>
+    """)
+
+
+def test_broadcast_uses_a_scalar_operand_directly():
+    """A scalar has nothing to index: `%s` goes straight into the multiply."""
+    check_lowering("""
+    func.func @f(%s: i32, %a: tensor<2x3xi32>) -> tensor<2x3xi32> {
+      %r = "hc.mul_tensor"(%s, %a) : (i32, tensor<2x3xi32>) -> tensor<2x3xi32>
+      func.return %r : tensor<2x3xi32>
+    }""", """
+    // CHECK: scf.for %[[I:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK: scf.for %[[J:.*]] = %{{.*}} to %{{.*}} step
+    // CHECK-NEXT: %[[X:.*]] = tensor.extract %a[%[[I]], %[[J]]] : tensor<2x3xi32>
+    // CHECK-NEXT: %[[Z:.*]] = arith.muli %s, %[[X]] : i32
+    // CHECK-NEXT: tensor.insert %[[Z]] into %{{.*}}[%[[I]], %[[J]]] : tensor<2x3xi32>
+    """)
+
+
 def test_equal_loop_bounds_share_one_constant():
     """A 2x2 result needs the bound 2 twice; both loops use the same
     constant."""

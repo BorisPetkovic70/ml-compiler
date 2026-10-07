@@ -10,6 +10,7 @@ from hc_dialect import (
     HCAdd, HCMul, HCSub, HCRelu, HCPow, HCMax, HCMin,
     HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec,
     HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor,
+    broadcast_shape,
 )
 
 SCALAR_BINOPS = [HCAdd, HCMul, HCSub]
@@ -157,18 +158,17 @@ def test_tensor_binop_rejects_mismatched_shapes(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 4)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3)])
-    with pytest.raises(ValueError, match="same tensor type"):
+    with pytest.raises(ValueError, match="cannot broadcast shapes"):
         op.verify()
 
 
 @pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
 def test_tensor_binop_rejects_mismatched_result_type(op_cls):
-    """lhs and rhs match each other, but the result type differs from both --
-    the second raise branch in _verify_bin_same_tensor_type."""
+    """The operands broadcast to 2x3, but the result is declared 2x4."""
     blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(2, 3)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 4)])
-    with pytest.raises(ValueError, match="match operand tensor type"):
+    with pytest.raises(ValueError, match="result shape must be"):
         op.verify()
 
 
@@ -185,8 +185,40 @@ def test_tensor_binop_rejects_mismatched_batch_dim(op_cls):
     blk = Block(arg_types=[tensor_ty(2, 3, 4), tensor_ty(5, 3, 4)])
     a, b = blk.args
     op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3, 4)])
-    with pytest.raises(ValueError, match="same tensor type"):
+    with pytest.raises(ValueError, match="cannot broadcast shapes"):
         op.verify()
+
+
+@pytest.mark.parametrize("a,b,expected", [
+    ([2, 3], [2, 3], [2, 3]),
+    ([2, 3], [3], [2, 3]),        # aligned at the last dim
+    ([2, 1], [1, 3], [2, 3]),     # each operand stretches one dim
+    ([], [4], [4]),               # a scalar has shape []
+])
+def test_broadcast_shape(a, b, expected):
+    assert broadcast_shape(a, b) == expected
+
+
+def test_broadcast_shape_rejects_unequal_dims():
+    """Dims of 3 and 4 differ and neither is 1."""
+    with pytest.raises(ValueError, match="cannot broadcast shapes"):
+        broadcast_shape([2, 3], [4])
+
+
+@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+def test_tensor_binop_constructs_with_broadcast(op_cls):
+    blk = Block(arg_types=[tensor_ty(2, 3), tensor_ty(3)])
+    a, b = blk.args
+    op = op_cls(operands=[a, b], result_types=[tensor_ty(2, 3)])
+    op.verify()
+
+
+@pytest.mark.parametrize("op_cls", TENSOR_BINOPS)
+def test_tensor_binop_constructs_with_scalar_operand(op_cls):
+    blk = Block(arg_types=[IntegerType(32), tensor_ty(2, 3)])
+    s, t = blk.args
+    op = op_cls(operands=[s, t], result_types=[tensor_ty(2, 3)])
+    op.verify()
 
 
 @pytest.mark.parametrize("op_cls", TENSOR_BINOPS)

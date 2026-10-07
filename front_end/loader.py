@@ -8,9 +8,12 @@ get the same type. A value that isn't INT32, has rank 4 or more, or has a dim
 without a known positive size is rejected (`_check_value`).
 
 Each node picks its hc op variant (scalar, `*_vec`, `*_tensor`) from the types
-of the operands it receives, and the op is verified as it is built, so
-operands that don't fit (for example a bias add that needs broadcasting) are
-rejected with the node's name.
+of the operands it receives. `Add`, `Sub` and `Mul` take the tensor variant
+when either operand is a tensor; its result type is the shape the operands
+broadcast to (`broadcast_shape`), so the other operand may be a scalar or
+have dims of size 1. The op is verified as it is built, so operands that
+don't fit (for example a tensor with a vector) are rejected with the node's
+name.
 """
 import onnx
 from xdsl.dialects import func, arith, builtin
@@ -23,6 +26,7 @@ from xdsl.utils.exceptions import VerifyException
 from hc_dialect import HiCompiler, HCAdd, HCSub, HCMul, HCRelu, HCPow, HCMax, HCMin
 from hc_dialect import HCAddVec, HCSubVec, HCMulVec, HCMulVecVec, HCReluVec
 from hc_dialect import HCMatmul, HCAddTensor, HCSubTensor, HCMulTensor, HCReluTensor
+from hc_dialect import broadcast_shape, shape_of
 
 # --------------------------------------
 #  Helper functions
@@ -108,9 +112,10 @@ def import_onnx_to_hc_module(
 
     Raises NotImplementedError for an unsupported op_type, element type, rank
     or dim, a vector operand to Pow/Max/Min, or operand types the node's hc
-    op rejects; ValueError for a model without exactly one output or a
-    `Constant` node without a `value` attribute, and KeyError when a node
-    reads a value that is not yet defined.
+    op rejects; ValueError for operand shapes that don't broadcast, a model
+    without exactly one output or a `Constant` node without a `value`
+    attribute, and KeyError when a node reads a value that is not yet
+    defined.
     """
     model = onnx.load(onnx_path)
     graph = model.graph
@@ -165,43 +170,53 @@ def import_onnx_to_hc_module(
                 types = ", ".join(str(v.type) for v in hc_op.operands)
                 raise NotImplementedError(
                     f"ONNX {node.op_type} node {node.name or node.output[0]!r}: "
-                    f"{hc_op.name} rejects operand types ({types}); "
-                    f"broadcasting is not supported"
+                    f"{hc_op.name} rejects operand types ({types})"
                 ) from e
             ops.append(hc_op)
             env[node.output[0]] = hc_op.results[0]
 
+        def broadcast_type(a, b):
+            """Returns the tensor type `a` and `b` broadcast to, naming this
+            node if their shapes don't fit."""
+            try:
+                shape = broadcast_shape(shape_of(a.type), shape_of(b.type))
+            except ValueError as e:
+                raise ValueError(
+                    f"ONNX {node.op_type} node {node.name or node.output[0]!r}: {e}"
+                ) from e
+            return builtin.TensorType(i32, shape)
+
         if node.op_type == "Add":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_tensor(a) and _is_tensor(b):
-                hc_cls = HCAddTensor
+            if _is_tensor(a) or _is_tensor(b):
+                hc_cls, res_ty = HCAddTensor, broadcast_type(a, b)
             elif _is_vec(a) and _is_vec(b):
-                hc_cls = HCAddVec
+                hc_cls, res_ty = HCAddVec, a.type
             else:
-                hc_cls = HCAdd
-            hc = hc_cls(operands=[a, b], result_types=[a.type])
+                hc_cls, res_ty = HCAdd, a.type
+            hc = hc_cls(operands=[a, b], result_types=[res_ty])
             emit(hc)
             continue
 
         if node.op_type == "Sub":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_tensor(a) and _is_tensor(b):
-                hc_cls = HCSubTensor
+            if _is_tensor(a) or _is_tensor(b):
+                hc_cls, res_ty = HCSubTensor, broadcast_type(a, b)
             elif _is_vec(a) and _is_vec(b):
-                hc_cls = HCSubVec
+                hc_cls, res_ty = HCSubVec, a.type
             else:
-                hc_cls = HCSub
-            hc = hc_cls(operands=[a, b], result_types=[a.type])
+                hc_cls, res_ty = HCSub, a.type
+            hc = hc_cls(operands=[a, b], result_types=[res_ty])
             emit(hc)
             continue
 
         if node.op_type == "Mul":
             a = get(node.input[0])
             b = get(node.input[1])
-            if _is_tensor(a) and _is_tensor(b):
-                hc = HCMulTensor(operands=[a, b], result_types=[a.type])
+            if _is_tensor(a) or _is_tensor(b):
+                hc = HCMulTensor(operands=[a, b], result_types=[broadcast_type(a, b)])
             elif _is_vec(a) and _is_vec(b):
                 hc = HCMulVecVec(operands=[a, b], result_types=[a.type])
             elif _is_vec(a) or _is_vec(b):

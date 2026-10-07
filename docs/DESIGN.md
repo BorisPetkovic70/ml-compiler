@@ -40,9 +40,9 @@ These are three separate kinds of value, each with its own op family (`hc.add`, 
 | tensor | `tensor<Nxi32>`, `tensor<MxNxi32>`, … | none | an `scf.for` loop nest |
 
 The type constraints (`VecInt`, `TensorInt`) only fix the element type. They do not relate the
-shapes of different operands, so every op with a shape rule (same shape; `MxK · KxN → MxN`; a
-matching batch dim) enforces it in a hand-written `verify_()`. Keeping families separate keeps
-each verifier small.
+shapes of different operands, so every op with a shape rule (same shape; a broadcast shape;
+`MxK · KxN → MxN`; a matching batch dim) enforces it in a hand-written `verify_()`. Keeping
+families separate keeps each verifier small.
 
 The tensor ops are the first whose lowering adds structure the source op didn't have:
 
@@ -50,6 +50,22 @@ The tensor ops are the first whose lowering adds structure the source op didn't 
   reduction. `_build_nest` builds the loops and the op supplies only the body.
 - `hc.matmul`: `i, j, k` loops, where `k` is the reduction. Rank 3 adds one outer batch loop,
   whose induction variable is prepended to every index.
+
+**Broadcasting.** `hc.add_tensor`, `hc.sub_tensor` and `hc.mul_tensor` follow NumPy's rules:
+the operand shapes are aligned at the last dim, and each pair of dims must be equal or one of
+them 1. An operand may also be a scalar `i32`. `broadcast_shape(a, b)` in `hc_dialect.py`
+computes the result shape; the verifier and the loader both use it.
+
+The lowering loops over the result's shape and reads each operand as far as its own shape
+reaches (`_broadcast_extract`). A tensor operand is indexed by the trailing induction
+variables, with a constant `0` where its dim is 1 and the result's is not. A scalar operand is
+used directly. Nothing is copied or expanded:
+
+```mlir
+// %a: tensor<2x3xi32>, %b: tensor<2x1xi32>, inside the i/j nest
+%x = tensor.extract %a[%i, %j] : tensor<2x3xi32>
+%y = tensor.extract %b[%i, %c0] : tensor<2x1xi32>
+```
 
 `hc.max`/`hc.min` lower to `arith.cmpi` + `scf.if`, not `arith.maxsi`/`minsi`. That follows the
 tutorial in `doc_upload/`, which uses them to introduce structured control flow. The
@@ -223,13 +239,14 @@ checked by it:
    interpreter before and after the whole middle end, and both results must equal the
    expected value. A FileCheck test shows which ops a pass emits, not that they compute the
    right result; this does.
-2. **Independent ground truth.** Matmul results are compared with NumPy, not with a second
-   hand-written implementation that could share a bug. Other ops use hand-computed expected
-   values.
+2. **Independent ground truth.** Matmul and broadcasting results are compared with NumPy, not
+   with a second hand-written implementation that could share a bug. Other ops use
+   hand-computed expected values.
 3. **`module.verify()`** after the pipeline (in tests), so invalid IR fails at the source.
 
 Values: scalars are ints, vectors flat lists, tensors and memrefs nested row-major lists.
-Tensor ops copy; memref ops mutate. The interpreter is built to fail loudly:
+Tensor ops copy; memref ops mutate. The `hc` binary ops broadcast with `_broadcast_binop`,
+which is written independently of the lowering. The interpreter is built to fail loudly:
 
 - every index is bounds-checked (Python would silently wrap a negative index);
 - `memref.alloc` fills with `None`, so an element nothing ever wrote fails on first arithmetic
@@ -257,8 +274,10 @@ Each limit below exists because no current workload needs it, not by accident.
   `hc.relu`/`hc.pow` lowerings hardcode `i32` constants.
 - **Shapes:** rank 0 (scalar), 1 (vector), 2–3 (tensor, one batch dim), with every dim a known
   positive size. The loader rejects anything else (rank 4+, symbolic dims).
-- **No broadcasting.** Operands must have matching types (bias add `[M,N] + [N]` and
-  tensor × scalar are rejected), apart from `hc.mul_vec`'s scalar × vector.
+- **Broadcasting covers tensors and scalars only.** The `*_tensor` binary ops broadcast (§2).
+  The scalar and vector ops need matching types, apart from `hc.mul_vec`'s scalar × vector.
+  A rank-1 ONNX value is a vector, so the loader rejects a bias add `[M,N] + [N]`, while
+  `[M,N] + [1,N]` works.
 - **One function, one block, one output.** The loader, bufferization and interpreter all
   assume this.
 - **No overflow model.** Python ints don't wrap the way `i32` does in hardware.

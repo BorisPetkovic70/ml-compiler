@@ -26,6 +26,11 @@ def tensor_type(shape) -> str:
     return f"tensor<{'x'.join(str(d) for d in shape)}xi32>"
 
 
+def value_type(shape) -> str:
+    """`i32` for the scalar shape `()`, otherwise the tensor type."""
+    return tensor_type(shape) if shape else "i32"
+
+
 @pytest.mark.parametrize("op,ty,a,b,expected", [
     ("hc.add", "i32", 3, 4, 7),
     ("hc.sub", "i32", 10, 4, 6),
@@ -53,6 +58,27 @@ def test_binary_op(op, ty, a, b, expected):
       %r = "{op}"(%a, %b) : ({ty}, {ty}) -> {ty}
       func.return %r : {ty}
     }}""", [a, b], expected)
+
+
+@pytest.mark.parametrize("a_shape,b_shape", [
+    ((2, 3), (3,)),    # aligned at the last dim
+    ((2, 3), (1, 3)),  # a size-1 dim is stretched
+    ((2, 1), (1, 3)),  # each operand stretches one dim
+    ((2, 3), ()),      # tensor - scalar
+    ((), (2, 3)),      # scalar - tensor
+])
+def test_broadcast_matches_numpy(a_shape, b_shape):
+    """Subtraction, so swapped operands give a different result."""
+    rng = np.random.default_rng(0)
+    a = rng.integers(-5, 6, size=a_shape)
+    b = rng.integers(-5, 6, size=b_shape)
+    r = a - b
+    a_ty, b_ty, r_ty = value_type(a_shape), value_type(b_shape), tensor_type(r.shape)
+    check_oracle(f"""
+    func.func @f(%a: {a_ty}, %b: {b_ty}) -> {r_ty} {{
+      %r = "hc.sub_tensor"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
+      func.return %r : {r_ty}
+    }}""", [a.tolist(), b.tolist()], r.tolist())
 
 
 @pytest.mark.parametrize("op,ty,x,expected", [

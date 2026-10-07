@@ -6,6 +6,8 @@ Sections 1-2.
 types or shapes of an op's operands and result is enforced by that op's
 `verify_()`, which raises `ValueError`. Element-wise tensor ops accept any
 rank >= 1; `hc.matmul` accepts rank 2, or rank 3 with a leading batch dim.
+The binary element-wise tensor ops broadcast their operands with NumPy's
+rules (`broadcast_shape`), and either operand may be a scalar.
 
 An op belongs to the dialect only once it is listed in the `HiCompiler` tuple
 at the bottom of this file (checklist: docs/HOW_TO_ADD_AN_OP.md).
@@ -13,6 +15,7 @@ at the bottom of this file (checklist: docs/HOW_TO_ADD_AN_OP.md).
 from xdsl.ir import Dialect
 from xdsl.irdl import (
     IRDLOperation,
+    base,
     irdl_op_definition,
     operand_def,
     result_def,
@@ -208,6 +211,32 @@ def _dim(int_attr) -> int:
     return int_attr.data
 
 
+def shape_of(ty) -> list[int]:
+    """Returns the dims of a shaped type, or [] for an integer type."""
+    if isinstance(ty, IntegerType):
+        return []
+    return [_dim(d) for d in ty.shape]
+
+
+def broadcast_shape(a: list[int], b: list[int]) -> list[int]:
+    """Returns the shape that shapes `a` and `b` broadcast to, by NumPy's
+    rules.
+
+    The shapes are aligned at their last dim, and the shorter one is padded
+    with 1s on the left. Each pair of dims must be equal, or one of them 1;
+    the result takes the larger. Raises ValueError otherwise.
+    """
+    rank = max(len(a), len(b))
+    padded_a = [1] * (rank - len(a)) + list(a)
+    padded_b = [1] * (rank - len(b)) + list(b)
+    shape = []
+    for x, y in zip(padded_a, padded_b):
+        if x != y and 1 not in (x, y):
+            raise ValueError(f"cannot broadcast shapes {list(a)} and {list(b)}")
+        shape.append(max(x, y))
+    return shape
+
+
 @irdl_op_definition
 class HCMatmul(IRDLOperation):
     """(MxK) @ (KxN) -> (MxN), or batched (BxMxK) @ (BxKxN) -> (BxMxN)."""
@@ -261,57 +290,69 @@ class HCMatmul(IRDLOperation):
             )
 
 
-def _verify_bin_same_tensor_type(op: IRDLOperation):
-    """Requires lhs, rhs, and res to have the identical tensor type, of rank
-    >= 1."""
+# An operand of a broadcasting op: a scalar, or a tensor of integers.
+ScalarOrTensorInt = base(IntegerType) | TensorInt
+
+
+def _verify_broadcast_binop(op: IRDLOperation):
+    """Requires each operand to be an integer or a tensor of rank >= 1, at
+    least one of them a tensor, and res to be a tensor of the operands'
+    broadcast shape. Operands and result share one element type."""
     lhs_t, rhs_t, res_t = op.lhs.type, op.rhs.type, op.res.type
-    if len(lhs_t.shape) < 1:
-        raise ValueError(f"{op.name}: operands must have rank >= 1, got {lhs_t}")
-    if lhs_t != rhs_t:
+    tensors = [t for t in (lhs_t, rhs_t) if isinstance(t, TensorType)]
+    if not tensors:
         raise ValueError(
-            f"{op.name}: lhs and rhs must have the same tensor type, got {lhs_t} vs {rhs_t}"
+            f"{op.name}: at least one operand must be a tensor, got {lhs_t} and {rhs_t}"
         )
-    if res_t != lhs_t:
-        raise ValueError(
-            f"{op.name}: result must match operand tensor type, got res={res_t}, operand={lhs_t}"
-        )
+    for t in tensors:
+        if len(t.shape) < 1:
+            raise ValueError(f"{op.name}: operands must have rank >= 1, got {t}")
+    for t in (lhs_t, rhs_t):
+        elem_t = t.element_type if isinstance(t, TensorType) else t
+        if elem_t != res_t.element_type:
+            raise ValueError(
+                f"{op.name}: operands and result must share the same element type, "
+                f"got lhs={lhs_t}, rhs={rhs_t}, res={res_t}"
+            )
+    shape = broadcast_shape(shape_of(lhs_t), shape_of(rhs_t))
+    if shape_of(res_t) != shape:
+        raise ValueError(f"{op.name}: result shape must be {shape}, got {res_t}")
 
 
 @irdl_op_definition
 class HCAddTensor(IRDLOperation):
-    """Element-wise tensor + tensor -> tensor."""
+    """Element-wise lhs + rhs -> tensor, with broadcasting."""
     name = "hc.add_tensor"
-    lhs = operand_def(TensorInt)
-    rhs = operand_def(TensorInt)
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        _verify_bin_same_tensor_type(self)
+        _verify_broadcast_binop(self)
 
 
 @irdl_op_definition
 class HCSubTensor(IRDLOperation):
-    """Element-wise tensor - tensor -> tensor."""
+    """Element-wise lhs - rhs -> tensor, with broadcasting."""
     name = "hc.sub_tensor"
-    lhs = operand_def(TensorInt)
-    rhs = operand_def(TensorInt)
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        _verify_bin_same_tensor_type(self)
+        _verify_broadcast_binop(self)
 
 
 @irdl_op_definition
 class HCMulTensor(IRDLOperation):
-    """Element-wise tensor * tensor -> tensor. There is no scalar * tensor
-    variant."""
+    """Element-wise lhs * rhs -> tensor, with broadcasting."""
     name = "hc.mul_tensor"
-    lhs = operand_def(TensorInt)
-    rhs = operand_def(TensorInt)
+    lhs = operand_def(ScalarOrTensorInt)
+    rhs = operand_def(ScalarOrTensorInt)
     res = result_def(TensorInt)
 
     def verify_(self):
-        _verify_bin_same_tensor_type(self)
+        _verify_broadcast_binop(self)
 
 
 @irdl_op_definition

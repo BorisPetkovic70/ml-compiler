@@ -6,6 +6,9 @@ Values: scalars and `index` values are Python ints; vectors are flat lists;
 tensors and memrefs are row-major nested lists. Tensor ops return copies;
 memref ops mutate in place. An unimplemented op raises RuntimeError.
 
+The `hc` binary ops broadcast their operands (`_broadcast_binop`). The
+`arith` ops take operands of one type and do not (`_elt_binop`).
+
 Simplifications:
 - Ints are unbounded, so i32 overflow never wraps.
 - `arith.cmpi` supports only `sgt` and `slt`.
@@ -84,6 +87,37 @@ def _elt_binop(a, b, f):
     if isinstance(b, list):
         return [_elt_binop(a, y, f) for y in b]
     return f(a, b)
+
+
+def _depth(x) -> int:
+    """Nesting depth of a value: 0 for a scalar, 1 for a flat list, and so
+    on."""
+    return 1 + _depth(x[0]) if isinstance(x, list) else 0
+
+
+def _broadcast_binop(a, b, f):
+    """Applies f element-wise with NumPy broadcasting, written independently
+    of the lowering.
+
+    The shallower operand is paired, whole, with each element of the deeper
+    one, which aligns the two at their last dim. At equal depth, a list of
+    length 1 is repeated to the other's length. Raises RuntimeError when two
+    lengths differ and neither is 1.
+    """
+    depth_a, depth_b = _depth(a), _depth(b)
+    if depth_a == depth_b == 0:
+        return f(a, b)
+    if depth_a < depth_b:
+        return [_broadcast_binop(a, y, f) for y in b]
+    if depth_b < depth_a:
+        return [_broadcast_binop(x, b, f) for x in a]
+    if len(a) == 1:
+        a = a * len(b)
+    if len(b) == 1:
+        b = b * len(a)
+    if len(a) != len(b):
+        raise RuntimeError(f"Cannot broadcast dims of size {len(a)} and {len(b)}")
+    return [_broadcast_binop(x, y, f) for x, y in zip(a, b)]
 
 
 def _vec_len(vec_type: VectorType) -> int:
@@ -227,17 +261,17 @@ class Interpreter:
             # --- high-level HC ops (scalar and vector variants share semantics) ---
             if name in ("hc.add", "hc.add_vec", "hc.add_tensor"):
                 a, b = op.operands
-                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p + q))
+                self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p + q))
                 continue
 
             if name in ("hc.sub", "hc.sub_vec", "hc.sub_tensor"):
                 a, b = op.operands
-                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p - q))
+                self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p - q))
                 continue
 
             if name in ("hc.mul", "hc.mul_vec", "hc.mul_vec_vec", "hc.mul_tensor"):
                 a, b = op.operands
-                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), lambda p, q: p * q))
+                self._set(op.results[0], _broadcast_binop(self._get(a), self._get(b), lambda p, q: p * q))
                 continue
 
             if name in ("hc.relu", "hc.relu_vec", "hc.relu_tensor"):

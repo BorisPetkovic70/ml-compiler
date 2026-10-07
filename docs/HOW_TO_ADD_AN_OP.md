@@ -63,7 +63,8 @@ if node.op_type == "MatMul":
 ```
 
 If the op has scalar/vector/tensor variants (like `Add`/`Mul`), dispatch on `_is_tensor(...)` /
-`_is_vec(...)` for each operand, following the existing `Add`/`Sub`/`Mul` branches.
+`_is_vec(...)` for each operand, following the existing `Add`/`Sub`/`Mul` branches. A
+broadcasting tensor op takes its result type from `broadcast_type(a, b)`.
 
 ## 3. Lowering (`middle_end/hc_lowering.py`)
 
@@ -94,7 +95,8 @@ Then add the branch itself, building the replacement operation(s) and calling
 method (`hc.matmul`'s nest is ~40 lines), factor it into a module-level helper function
 (`_build_matmul_nest`) and call that from the branch. An element-wise tensor op needs no loop
 code of its own: pass a `compute(a, b)` function for one element to
-`_build_tensor_elementwise_nest`, which builds one loop per dim with `_build_nest`.
+`_build_tensor_elementwise_nest`, which builds one loop per dim with `_build_nest` and reads
+each operand with broadcasting.
 
 ## 4. Interpreter (`simulator/interpreter.py`)
 
