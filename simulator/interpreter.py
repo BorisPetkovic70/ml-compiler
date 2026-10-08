@@ -403,6 +403,26 @@ class Interpreter:
                 self._set(op.results[0], [self._get(src)] * n)
                 continue
 
+            # --- vector.load / vector.store: `n` elements of one row, starting
+            # at the last index ---
+            if name == "vector.load":
+                *outer, start = [self._get(i) for i in op.indices]
+                row = _tensor_extract(self._get(op.base), outer)
+                n = _vec_len(op.results[0].type)
+                _check_index(row, start)
+                _check_index(row, start + n - 1)
+                self._set(op.results[0], row[start:start + n])
+                continue
+
+            if name == "vector.store":
+                *outer, start = [self._get(i) for i in op.indices]
+                row = _tensor_extract(self._get(op.base), outer)
+                n = _vec_len(op.vector.type)
+                _check_index(row, start)
+                _check_index(row, start + n - 1)
+                row[start:start + n] = self._get(op.vector)
+                continue
+
             if name == "arith.cmpi":
                 a, b = op.operands
                 lhs = self._get(a)

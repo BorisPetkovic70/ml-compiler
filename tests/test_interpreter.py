@@ -118,3 +118,33 @@ def test_memref_use_after_dealloc_raises():
     }""")
     with pytest.raises(KeyError):
         run(module, [], "f")
+
+
+def test_vector_store_and_load_move_a_run_of_elements():
+    """`vector.load` reads 4 elements of row 1, starting at column 1.
+    `vector.store` writes them to row 0 from column 2 on, in place."""
+    buf = [[0, 0, 0, 0, 0, 0], [1, 2, 3, 4, 5, 6]]
+    module = parse("""
+    func.func @f(%buf: memref<2x6xi32>) -> vector<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c1 = arith.constant 1 : index
+      %c2 = arith.constant 2 : index
+      %v = vector.load %buf[%c1, %c1] : memref<2x6xi32>, vector<4xi32>
+      vector.store %v, %buf[%c0, %c2] : memref<2x6xi32>, vector<4xi32>
+      func.return %v : vector<4xi32>
+    }""")
+    assert run(module, [buf], "f") == [2, 3, 4, 5]
+    assert buf == [[0, 0, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6]]
+
+
+def test_vector_load_past_the_end_of_a_row_raises():
+    """A 4-element load from column 3 of a 6-element row needs column 6."""
+    module = parse("""
+    func.func @f(%buf: memref<2x6xi32>) -> vector<4xi32> {
+      %c0 = arith.constant 0 : index
+      %c3 = arith.constant 3 : index
+      %v = vector.load %buf[%c0, %c3] : memref<2x6xi32>, vector<4xi32>
+      func.return %v : vector<4xi32>
+    }""")
+    with pytest.raises(RuntimeError, match="out of bounds"):
+        run(module, [[[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6]]], "f")

@@ -1,11 +1,12 @@
 """The middle-end pass pipeline:
 lowering -> bufferization -> loop interchange -> loop tiling ->
-constant folding -> constant CSE -> DCE.
+vectorization -> constant folding -> constant CSE -> DCE.
 
 The order is fixed and load-bearing (docs/DESIGN.md Section 5); each pass is
-switched on or off by `MiddleEndPipelineConfig`. Loop interchange and loop
-tiling are off by default. `apply_passes` rewrites the module in place and
-never calls `module.verify()`: verification is the caller's responsibility.
+switched on or off by `MiddleEndPipelineConfig`. Loop interchange, loop
+tiling and vectorization are off by default. `apply_passes` rewrites the
+module in place and never calls `module.verify()`: verification is the
+caller's responsibility.
 """
 import inspect
 from dataclasses import dataclass
@@ -25,13 +26,15 @@ from .dead_code_elimination import apply_dce
 from .hc_lowering import LowerHCPattern
 from .loop_interchange import apply_loop_interchange
 from .loop_tiling import apply_loop_tiling
+from .vectorization import apply_vectorization
 # -----------------------------
 # Configuration object
 # -----------------------------
 @dataclass(frozen=True)
 class MiddleEndPipelineConfig:
-    """Pass switches. `tile_size` is the tile size for loop tiling, and 0
-    turns it off. `debug_mode` prints the module after each pass;
+    """Pass switches. `tile_size` is the tile size for loop tiling and
+    `vector_width` the number of elements per vector for vectorization; 0
+    turns either off. `debug_mode` prints the module after each pass;
     `run_analysis` prints the analysis.py reports after the last pass."""
     run_analysis: bool = False
     debug_mode: bool = False
@@ -40,6 +43,7 @@ class MiddleEndPipelineConfig:
     apply_bufferization: bool = True
     interchange_loops: bool = False
     tile_size: int = 0
+    vector_width: int = 0
     apply_constant_folding: bool = True
     apply_cse: bool = True
     apply_dce: bool = True
@@ -72,6 +76,11 @@ class MiddleEndPipeline:
             # Run each matmul nest one tile at a time
             apply_loop_tiling(module, self.config.tile_size)
             self._print_module(module, "=== AFTER LOOP TILING ===")
+
+        if self.config.vector_width:
+            # Run the innermost loop of each matmul nest one vector at a time
+            apply_vectorization(module, self.config.vector_width)
+            self._print_module(module, "=== AFTER VECTORIZATION ===")
 
         if self.config.apply_constant_folding:
             # Apply constant folding

@@ -29,21 +29,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _compile_and_run(tmp_path, onnx_path, run_args):
-    """Loads `onnx_path` and runs the full middle end (every pass on), then
-    verifies the module and writes a harness. It compiles the result with
+def _compile_and_run(tmp_path, onnx_path, run_args, config=MiddleEndPipelineConfig()):
+    """Loads `onnx_path` and runs the middle end under `config` (by default
+    every pass but the loop passes), then verifies the module and writes a
+    harness. It compiles the result with
     back_end.sh's pass list, using the tools found on PATH (back_end.sh's
     default TOOLCHAIN_BIN_DIR is machine-specific). Finally it runs the
     executable with `run_args` and returns its stdout."""
     ctx = build_context()
     module = import_onnx_to_hc_module(ctx, str(onnx_path), fn_name="my_func")
 
-    cfg = MiddleEndPipelineConfig(
-        apply_lowering=True, apply_bufferization=True,
-        apply_constant_folding=True, apply_dce=True,
-        run_analysis=False, debug_mode=False,
-    )
-    MiddleEndPipeline(cfg).apply_passes(module)
+    MiddleEndPipeline(config).apply_passes(module)
     module.verify()
 
     lowered = tmp_path / "lowered.mlir"
@@ -150,6 +146,28 @@ def test_memref_abi_compiles_and_matches_independent_oracle(tmp_path):
     stdout = _compile_and_run(tmp_path, onnx_path, args)
     actual = [_parse_ints(row) for row in stdout.splitlines() if row.strip()]
     assert actual == expected
+
+
+def test_matmul_with_loop_passes_compiles_and_matches_numpy(tmp_path):
+    """C = A @ B with loop interchange, tiling and vectorization on. 5 rows
+    and 7 inner steps leave a short last tile, and 10 columns leave 2 scalar
+    steps after two 4-element vectors. The `vector.load`/`vector.store` ops
+    go through the same back-end passes as the scalar code."""
+    np = pytest.importorskip("numpy")
+    onnx_path = tmp_path / "matmul.onnx"
+    m, k, n = 5, 7, 10
+    build_matmul_model(str(onnx_path), m=m, k=k, n=n)
+
+    rng = np.random.default_rng(seed=7)
+    a = rng.integers(-5, 6, size=(m, k))
+    b = rng.integers(-5, 6, size=(k, n))
+
+    args = [*a.flatten().tolist(), *b.flatten().tolist()]
+    config = MiddleEndPipelineConfig(interchange_loops=True, tile_size=4, vector_width=4)
+    stdout = _compile_and_run(tmp_path, onnx_path, args, config)
+    assert "vector.store" in (tmp_path / "lowered.mlir").read_text()
+    actual = [_parse_ints(row) for row in stdout.splitlines() if row.strip()]
+    assert actual == np.matmul(a, b).tolist()
 
 
 def test_weight_initializer_compiles_and_matches_numpy(tmp_path):

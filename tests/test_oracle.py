@@ -169,6 +169,48 @@ def test_matmul_with_loop_tiling_matches_numpy(a_shape, b_shape):
         config=MiddleEndPipelineConfig(interchange_loops=True, tile_size=2))
 
 
+@pytest.mark.parametrize("a_shape,b_shape", [
+    ((3, 5), (5, 10)),  # 10 columns: two vectors, then 2 scalar steps
+    ((3, 5), (5, 8)),  # 8 columns: two vectors and no scalar loop
+    ((2, 3, 5), (2, 5, 10)),  # batched
+])
+def test_matmul_with_vectorization_matches_numpy(a_shape, b_shape):
+    """The `i, k, j` nest, tiled, runs its `j` loop 4 columns at a time.
+    Each `C[i, j]` still gets the same products added, whether a vector step
+    or a scalar step adds them."""
+    rng = np.random.default_rng(0)
+    a = rng.integers(-5, 6, size=a_shape)
+    b = rng.integers(-5, 6, size=b_shape)
+    r = a @ b
+    a_ty, b_ty, r_ty = tensor_type(a.shape), tensor_type(b.shape), tensor_type(r.shape)
+    check_oracle(f"""
+    func.func @f(%a: {a_ty}, %b: {b_ty}) -> {r_ty} {{
+      %r = "hc.matmul"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
+      func.return %r : {r_ty}
+    }}""", [a.tolist(), b.tolist()], r.tolist(),
+        config=MiddleEndPipelineConfig(interchange_loops=True, tile_size=2, vector_width=4))
+
+
+@pytest.mark.parametrize("op,reference", [
+    ("hc.add", np.add),
+    ("hc.mul", np.multiply),
+    ("hc.max", np.maximum),  # lowers to scf.if: its loop stays scalar
+])
+def test_elementwise_with_vectorization_matches_numpy(op, reference):
+    """`relu(op(a, b))` on 2x10 tensors, 4 columns at a time. `b` has shape
+    2x1, so each row's single element is broadcast into a vector."""
+    rng = np.random.default_rng(0)
+    a = rng.integers(-5, 6, size=(2, 10))
+    b = rng.integers(-5, 6, size=(2, 1))
+    check_oracle(f"""
+    func.func @f(%a: tensor<2x10xi32>, %b: tensor<2x1xi32>) -> tensor<2x10xi32> {{
+      %t = "{op}"(%a, %b) : (tensor<2x10xi32>, tensor<2x1xi32>) -> tensor<2x10xi32>
+      %r = "hc.relu"(%t) : (tensor<2x10xi32>) -> tensor<2x10xi32>
+      func.return %r : tensor<2x10xi32>
+    }}""", [a.tolist(), b.tolist()], np.maximum(reference(a, b), 0).tolist(),
+        config=MiddleEndPipelineConfig(vector_width=4))
+
+
 def test_matmul_with_weight_constant_matches_numpy():
     """`%w` is a weight, as the loader builds it from an ONNX initializer.
     After bufferization it is read from a `memref.global`."""
