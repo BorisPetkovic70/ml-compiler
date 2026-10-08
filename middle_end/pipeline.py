@@ -1,10 +1,11 @@
 """The middle-end pass pipeline:
-lowering -> bufferization -> constant folding -> constant CSE -> DCE.
+lowering -> bufferization -> loop interchange -> constant folding ->
+constant CSE -> DCE.
 
 The order is fixed and load-bearing (docs/DESIGN.md Section 5); each pass is
-switched on or off by `MiddleEndPipelineConfig`. `apply_passes` rewrites the
-module in place and never calls `module.verify()`: verification is the
-caller's responsibility.
+switched on or off by `MiddleEndPipelineConfig`. Loop interchange is off by
+default. `apply_passes` rewrites the module in place and never calls
+`module.verify()`: verification is the caller's responsibility.
 """
 import inspect
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from .constant_folding import FoldArithInts
 from .cse import apply_constant_cse
 from .dead_code_elimination import apply_dce
 from .hc_lowering import LowerHCPattern
+from .loop_interchange import apply_loop_interchange
 # -----------------------------
 # Configuration object
 # -----------------------------
@@ -34,6 +36,7 @@ class MiddleEndPipelineConfig:
 
     apply_lowering: bool = True
     apply_bufferization: bool = True
+    interchange_loops: bool = False
     apply_constant_folding: bool = True
     apply_cse: bool = True
     apply_dce: bool = True
@@ -56,6 +59,11 @@ class MiddleEndPipeline:
             # Bufferize any function using tensors (a no-op on scalar-only ones)
             apply_bufferization(module)
             self._print_module(module, "=== AFTER BUFFERIZATION (memref.*) ===")
+
+        if self.config.interchange_loops:
+            # Reorder each matmul nest from i, j, k to i, k, j
+            apply_loop_interchange(module)
+            self._print_module(module, "=== AFTER LOOP INTERCHANGE ===")
 
         if self.config.apply_constant_folding:
             # Apply constant folding

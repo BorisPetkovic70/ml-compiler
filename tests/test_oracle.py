@@ -12,12 +12,13 @@ from conftest import parse, run
 from middle_end.pipeline import MiddleEndPipeline, MiddleEndPipelineConfig
 
 
-def check_oracle(ir: str, args: list, expected) -> None:
-    """Checks `@f(*args) == expected` before and after the middle end
-    (lowering, bufferization, constant folding and DCE)."""
+def check_oracle(ir: str, args: list, expected, config=MiddleEndPipelineConfig()) -> None:
+    """Checks `@f(*args) == expected` before and after the middle end. The
+    default `config` runs lowering, bufferization, constant folding, constant
+    CSE and DCE."""
     module = parse(ir)
     assert run(module, args, "f") == expected
-    MiddleEndPipeline(MiddleEndPipelineConfig()).apply_passes(module)
+    MiddleEndPipeline(config).apply_passes(module)
     module.verify()
     assert run(module, args, "f") == expected
 
@@ -125,6 +126,26 @@ def test_matmul_matches_numpy(a_shape, b_shape):
       %r = "hc.matmul"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
       func.return %r : {r_ty}
     }}""", [a.tolist(), b.tolist()], r.tolist())
+
+
+@pytest.mark.parametrize("a_shape,b_shape", [
+    ((2, 3), (3, 4)),
+    ((2, 2, 3), (2, 3, 4)),  # batched: the batch loop stays outermost
+])
+def test_matmul_with_loop_interchange_matches_numpy(a_shape, b_shape):
+    """The matmul nest runs in `i, k, j` order. Each `C[i, j]` still gets the
+    same products added, so the result is the same."""
+    rng = np.random.default_rng(0)
+    a = rng.integers(-5, 6, size=a_shape)
+    b = rng.integers(-5, 6, size=b_shape)
+    r = a @ b
+    a_ty, b_ty, r_ty = tensor_type(a.shape), tensor_type(b.shape), tensor_type(r.shape)
+    check_oracle(f"""
+    func.func @f(%a: {a_ty}, %b: {b_ty}) -> {r_ty} {{
+      %r = "hc.matmul"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
+      func.return %r : {r_ty}
+    }}""", [a.tolist(), b.tolist()], r.tolist(),
+        config=MiddleEndPipelineConfig(interchange_loops=True))
 
 
 def test_matmul_with_weight_constant_matches_numpy():
