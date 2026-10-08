@@ -25,7 +25,7 @@ native executable  (+ back_end/harness_gen.py's generated C main)
 "what loops and memory implement it?" (lowering's job). It is ONNX-shaped but already xDSL IR,
 so it can be verified, printed and interpreted with the same tools as everything below it.
 
-Each stage boundary is also a test boundary: the interpreter (§6) runs the IR on both sides of
+Each stage boundary is also a test boundary: the interpreter (§7) runs the IR on both sides of
 a transform, and the results must match.
 
 ## 2. Scalars and tensors
@@ -214,10 +214,16 @@ input, `W` and `B` are weights, and the matmul and add results are temporaries.
 
 ## 5. Pass ordering and verification
 
-`MiddleEndPipeline.apply_passes` runs: **lowering → bufferization → constant folding → constant CSE → DCE**,
-each switchable via `MiddleEndPipelineConfig`.
+`MiddleEndPipeline.apply_passes` runs: **lowering → bufferization → loop interchange → loop
+tiling → vectorization → constant folding → constant CSE → DCE**, each switchable via
+`MiddleEndPipelineConfig`. The three loop passes are off by default (see below).
 
 - Bufferization needs lowering first: the `tensor.*` ops only exist after it.
+- The loop passes need bufferization first: they work on `scf.for` loops over `memref` loads
+  and stores, where no loop carries a tensor. They run in this order because each prepares
+  the next: interchange gives the `i, k, j` order that tiling and vectorization expect, and
+  tiling leaves the innermost loop for vectorization. Constant CSE, after them, merges the
+  constants they add.
 - Constant CSE (`middle_end/cse.py`) runs after folding, so it also merges the constants
   folding creates. Each lowering builds its own loop bounds and zeros; the pass keeps one
   `arith.constant` per value and type and moves it to the top of the function, where it is
@@ -226,6 +232,68 @@ each switchable via `MiddleEndPipelineConfig`.
 - `FoldArithInts` folds `addi`/`subi`/`muli`/`maxsi` on scalar/vector constants and a
   `vector.broadcast` of a constant. `apply_dce` repeats until nothing changes, removing
   unused `arith.*`/`vector.broadcast` ops from the function's top-level block.
+
+### Loop passes
+
+The lowering emits the simplest correct loops. Three hand-written passes then change how the
+loops run, not what they compute. Each is one small file with one `apply_*` function, and each
+leaves a loop it does not recognize unchanged.
+
+| Pass | Config | What it does |
+|---|---|---|
+| `loop_interchange.py` | `interchange_loops=True` | swaps the two innermost loops of a matmul nest: `i, j, k` becomes `i, k, j` |
+| `loop_tiling.py` | `tile_size=T` | splits the `i` and `k` loops of a matmul nest into a tile loop (`step T`) and a point loop over one tile |
+| `vectorization.py` | `vector_width=W` | runs an innermost loop `W` elements at a time on `vector<Wxi32>` values |
+
+**Interchange.** With `k` innermost, each step of the matmul body reads `B` one row further
+down, a new cache line every time. In `i, k, j` order the innermost loop walks `C` and `B`
+along a row and `A[i, k]` does not change. The pass recognizes a matmul nest by its body, which
+loads and stores the same element (`C[i, j] = C[i, j] + ...`). An element-wise nest never
+loads what it stores, so it is left unchanged.
+
+**Tiling.** The nest runs one `T x T` block of `(i, k)` at a time, so the rows of `B` that a
+block reads are reused for every `i` in it while they are still in the cache. A point loop
+ends at `min(start + T, bound)`, which cuts the last tile short when `T` does not divide the
+bound. The innermost loop is not tiled and keeps its constant bounds.
+
+**Vectorization.** A loop qualifies when its body ends with a store at `[..., j]`, `j` being
+its induction variable, and holds only loads, constants and `addi/subi/muli/maxsi/minsi`
+before it. Then each step writes the next element of a row, and `W` steps become one:
+
+```mlir
+// i, k, j matmul with N = 10 and W = 4
+scf.for %j = %c0 to %c8 step %c4 {
+  %c  = vector.load %C[%i, %j] : memref<3x10xi32>, vector<4xi32>
+  %a  = memref.load %A[%i, %k] : memref<3x5xi32>
+  %b  = vector.load %B[%k, %j] : memref<5x10xi32>, vector<4xi32>
+  %av = vector.broadcast %a : i32 to vector<4xi32>
+  %p  = arith.muli %av, %b : vector<4xi32>
+  %s  = arith.addi %c, %p : vector<4xi32>
+  vector.store %s, %C[%i, %j] : memref<3x10xi32>, vector<4xi32>
+}
+scf.for %j = %c8 to %c10 step %c1 {
+  // the original scalar body, for the last 2 elements
+}
+```
+
+A load or store indexed by `j` becomes a `vector.load` or `vector.store`. A scalar (a load
+without `j`, a constant, a value from outside the loop) is copied into every lane by
+`vector.broadcast` where it is used. The original loop stays behind the vector loop for the
+elements left over when `W` does not divide the bound.
+
+- Vectorized: the `i, k, j` matmul, its zero-fill nest, and the `hc.add/sub/mul/relu` nests,
+  including broadcast and scalar operands.
+- Not vectorized: the `i, j, k` matmul. Its innermost loop stores to the single element
+  `C[i, j]` on every step, so there is no row to store a vector to. Matmul vectorizes only
+  after interchange; an element-wise nest already has its last dim innermost and needs none.
+- Not vectorized: `hc.max`/`hc.min` (an `scf.if` in the body) and `hc.pow` (an inner loop).
+
+Vectors exist only as this pass's output. `back_end.sh` lowers them with
+`-convert-vector-to-llvm`, and `llc` emits SIMD instructions for them.
+
+The passes assume the nests the lowering emits rather than proving a transformation safe on
+any IR: perfect nests, bounds defined outside the nest, an innermost loop from 0 to a
+constant, and a stored buffer that is not read at a different element.
 
 The pipeline **never calls `module.verify()`**. Whether and when to verify is the caller's
 choice: `tests/conftest.py::lower()` verifies right after the pipeline, while `hc_main.py`
@@ -314,6 +382,9 @@ Each limit below exists because no current workload needs it, not by accident.
 - **Bufferization copies in the top-level block only** (§4). A write inside a loop body that
   would need a copy is refused.
 - **DCE** only scans the function's top-level block, not loop or `if` bodies.
+- **Loop passes** (§5) are switched on from Python only; `hc_main.py` and `hc_interpret.py`
+  have no flags for them. They recognize the nests the lowering emits and do no general
+  legality analysis. Interchange and tiling apply to matmul nests only.
 - **`analysis.py`**: bufferization uses `is_last_use`. The use-def and liveness printing is
   wired to a config flag, but no pass uses it, and its liveness is block-local (it doesn't see
   uses inside nested regions).

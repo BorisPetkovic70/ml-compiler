@@ -16,6 +16,7 @@ ONNX ─▶ front_end/loader.py ─▶ hc.* ─▶ middle_end/pipeline.py ─▶
                                 │      lowering → bufferization    per-model C harness       mlir-opt → mlir-translate
                                 │      → constant CSE                                        → llc → clang → build/<stem>_run
                                 │      (+ const folding, DCE; off in hc_main)
+                                │      (+ loop interchange, tiling, vectorization; off by default)
                                 └──▶ simulator/interpreter.py  (runs before and after the middle end; results must match)
 ```
 
@@ -47,6 +48,7 @@ python -m pytest --cov=hc_dialect --cov=middle_end --cov=back_end \
 The suite tests the compiler in two ways:
 
 - **FileCheck pass tests** (`test_lowering.py`, `test_bufferization.py`,
+  `test_loop_interchange.py`, `test_loop_tiling.py`, `test_vectorization.py`,
   `test_constant_folding.py`, `test_cse.py`, `test_dce.py`, `test_harness_gen.py`): a small IR string goes
   through one pass (or the harness generator), and the printed output, IR or C, is matched
   against `// CHECK:` lines. They show *what* a pass emits.
@@ -86,6 +88,10 @@ for the same arguments.
   score model**.
 - **`TOOLCHAIN_BIN_DIR`:** directory holding `mlir-opt`/`mlir-translate`/`llc`. The default in
   `back_end/back_end.sh` is a machine-specific path; override it with the env var.
+- **Loop passes:** loop interchange, loop tiling and vectorization are off by default and have
+  no command-line flag yet. Turn them on from Python, as the tests do:
+  `MiddleEndPipelineConfig(interchange_loops=True, tile_size=32, vector_width=8)`. See
+  [docs/DESIGN.md](docs/DESIGN.md) §5.
 - **Args** (executable and `hc_interpret.py`): one integer per scalar or per buffer
   element, in argument order. Missing args fall back to the same built-in defaults in
   both.
@@ -111,8 +117,9 @@ hc_interpret.py         interpreter driver: runs a model on given arguments, bef
 full_compiler.sh        hc_main.py + hc_interpret.py + back_end/back_end.sh, then compares the two results
 run_all_models.sh       full_compiler.sh on every sample model, with fixed inputs
 front_end/              loader.py (ONNX → hc), build_model.py (sample models)
-middle_end/             pipeline.py, hc_lowering.py, bufferization.py, constant_folding.py,
-                        cse.py, dead_code_elimination.py, analysis.py
+middle_end/             pipeline.py, hc_lowering.py, bufferization.py, loop_interchange.py,
+                        loop_tiling.py, vectorization.py, constant_folding.py, cse.py,
+                        dead_code_elimination.py, analysis.py
 back_end/               harness_gen.py, back_end.sh
 simulator/              interpreter.py
 tests/                  pytest suite
