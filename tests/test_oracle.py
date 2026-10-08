@@ -148,6 +148,27 @@ def test_matmul_with_loop_interchange_matches_numpy(a_shape, b_shape):
         config=MiddleEndPipelineConfig(interchange_loops=True))
 
 
+@pytest.mark.parametrize("a_shape,b_shape", [
+    ((3, 5), (5, 4)),  # 3 and 5 are not multiples of the tile size
+    ((2, 3, 5), (2, 5, 4)),  # batched: the batch loop is not tiled
+])
+def test_matmul_with_loop_tiling_matches_numpy(a_shape, b_shape):
+    """The `i, k, j` nest runs in 2 x 2 tiles of `i` and `k`. The last tile
+    of each is cut short at the loop's bound, so every `(i, k)` pair still
+    runs exactly once."""
+    rng = np.random.default_rng(0)
+    a = rng.integers(-5, 6, size=a_shape)
+    b = rng.integers(-5, 6, size=b_shape)
+    r = a @ b
+    a_ty, b_ty, r_ty = tensor_type(a.shape), tensor_type(b.shape), tensor_type(r.shape)
+    check_oracle(f"""
+    func.func @f(%a: {a_ty}, %b: {b_ty}) -> {r_ty} {{
+      %r = "hc.matmul"(%a, %b) : ({a_ty}, {b_ty}) -> {r_ty}
+      func.return %r : {r_ty}
+    }}""", [a.tolist(), b.tolist()], r.tolist(),
+        config=MiddleEndPipelineConfig(interchange_loops=True, tile_size=2))
+
+
 def test_matmul_with_weight_constant_matches_numpy():
     """`%w` is a weight, as the loader builds it from an ONNX initializer.
     After bufferization it is read from a `memref.global`."""

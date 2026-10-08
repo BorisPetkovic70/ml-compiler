@@ -386,6 +386,11 @@ class Interpreter:
                 self._set(op.results[0], _elt_binop(self._get(a), self._get(b), max))
                 continue
 
+            if name == "arith.minsi":
+                a, b = op.operands
+                self._set(op.results[0], _elt_binop(self._get(a), self._get(b), min))
+                continue
+
             if name == "arith.index_cast":
                 # index vs i32 is not distinguished in this Python-int interpreter.
                 (a,) = op.operands
