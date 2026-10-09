@@ -1,11 +1,15 @@
-"""Driver: `python hc_main.py [model.onnx]`, run from the repository root.
+"""Driver: `python hc_main.py [flags] [model.onnx]`, run from the repository
+root.
 
 Loads (or builds) the model, writes `build/<stem>_original.mlir`, runs the
 middle end (lowering, bufferization and constant CSE; folding and DCE
 disabled), and writes `build/<stem>_lowered.mlir` and
 `back_end/<stem>_harness.c`.
+
+The loop passes are off unless their flag is given: `--interchange`,
+`--tile T` and `--vectorize W`. `python hc_main.py --help` lists them.
 """
-import sys
+import argparse
 from pathlib import Path
 
 from xdsl.context import Context
@@ -73,10 +77,31 @@ def load_module(model_path: Path) -> ModuleOp:
     )
 
 
-def run_middle_end(module: ModuleOp, debug_mode: bool = False) -> None:
-    """Runs lowering, bufferization and constant CSE on `module`, in place."""
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Reads `[flags] [model.onnx] [values...]` from `argv`, or from the
+    command line when `argv` is None. hc_main.py and hc_interpret.py share
+    it, so both take the same flags; only hc_interpret.py uses `values`."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model", nargs="?", default=MODEL_PATH)
+    parser.add_argument("values", nargs="*", type=int,
+                        help="argument values, one per scalar or element (hc_interpret.py)")
+    parser.add_argument("--interchange", action="store_true",
+                        help="run each matmul nest in i, k, j order")
+    parser.add_argument("--tile", type=int, default=0, metavar="T",
+                        help="run each matmul nest in T x T tiles")
+    parser.add_argument("--vectorize", type=int, default=0, metavar="W",
+                        help="run innermost loops W elements at a time")
+    return parser.parse_args(argv)
+
+
+def run_middle_end(module: ModuleOp, options: argparse.Namespace, debug_mode: bool = False) -> None:
+    """Runs lowering, bufferization and constant CSE on `module`, in place,
+    with the loop passes `options` (from `parse_args`) turns on."""
     config = MiddleEndPipelineConfig(
         apply_lowering=True,
+        interchange_loops=options.interchange,
+        tile_size=options.tile,
+        vector_width=options.vectorize,
         apply_constant_folding=False,
         apply_dce=False,
         run_analysis=False,
@@ -90,7 +115,8 @@ def run_middle_end(module: ModuleOp, debug_mode: bool = False) -> None:
 # -----------------------------------------------------------------------------
 
 def main():
-    model_path = resolve_model_path(sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH)
+    options = parse_args()
+    model_path = resolve_model_path(options.model)
     model_name = model_path.stem
 
     build_dir = Path("build")
@@ -107,7 +133,7 @@ def main():
     with open(original_file, "w", encoding="utf-8") as f:
         f.write(str(module))
 
-    run_middle_end(module, debug_mode=True)
+    run_middle_end(module, options, debug_mode=True)
 
     print("Saving lowered module...")
     with open(lowered_file, "w", encoding="utf-8") as f:

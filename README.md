@@ -74,6 +74,9 @@ python hc_interpret.py matmul.onnx [args...] # run in the interpreter, before an
 TOOLCHAIN_BIN_DIR=/path/to/llvm/bin ./full_compiler.sh matmul.onnx [args...]   # both + compile, run, compare
 TOOLCHAIN_BIN_DIR=/path/to/llvm/bin ./run_all_models.sh                        # every sample model, fixed inputs
 build/matmul_run [args...]                   # rerun a compiled model
+
+# with the loop passes: the flags go before the model
+TOOLCHAIN_BIN_DIR=/path/to/llvm/bin ./full_compiler.sh --interchange --tile 2 --vectorize 4 matmul.onnx
 ```
 
 `full_compiler.sh` fails unless the executable prints exactly what the interpreter computes
@@ -88,10 +91,10 @@ for the same arguments.
   score model**.
 - **`TOOLCHAIN_BIN_DIR`:** directory holding `mlir-opt`/`mlir-translate`/`llc`. The default in
   `back_end/back_end.sh` is a machine-specific path; override it with the env var.
-- **Loop passes:** loop interchange, loop tiling and vectorization are off by default and have
-  no command-line flag yet. Turn them on from Python, as the tests do:
-  `MiddleEndPipelineConfig(interchange_loops=True, tile_size=32, vector_width=8)`. See
-  [docs/DESIGN.md](docs/DESIGN.md) §5.
+- **Loop passes:** off unless asked for. `--interchange` runs matmul in `i, k, j` order,
+  `--tile T` runs it in `T x T` tiles, and `--vectorize W` runs innermost loops `W` elements at
+  a time. `hc_main.py`, `hc_interpret.py`, `full_compiler.sh` and `run_all_models.sh` all take
+  them, before the model. See [docs/DESIGN.md](docs/DESIGN.md) §5.
 - **Args** (executable and `hc_interpret.py`): one integer per scalar or per buffer
   element, in argument order. Missing args fall back to the same built-in defaults in
   both.
@@ -101,7 +104,7 @@ for the same arguments.
 | File | Produced by | Contents |
 |---|---|---|
 | `build/{stem}_original.mlir` | `hc_main.py` | `hc.*` module from the loader |
-| `build/{stem}_lowered.mlir` | `hc_main.py` | after lowering, bufferization and constant CSE |
+| `build/{stem}_lowered.mlir` | `hc_main.py` | after lowering, bufferization, the loop passes asked for, and constant CSE |
 | `back_end/{stem}_harness.c` | `hc_main.py` | C `main` matching the entry signature |
 | `build/{stem}_llvm.mlir` | `back_end.sh` | `llvm` dialect, via `mlir-opt` |
 | `build/{stem}_out.ll` | `back_end.sh` | LLVM IR, via `mlir-translate` |

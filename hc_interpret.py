@@ -1,10 +1,13 @@
-"""Interpreter driver: `python hc_interpret.py [model.onnx] [args...]`, run
-from the repository root.
+"""Interpreter driver: `python hc_interpret.py [flags] [model.onnx]
+[args...]`, run from the repository root.
 
 Runs the model in the Python interpreter before and after the middle end, on
 the same arguments the compiled executable takes, and prints the result in the
 generated C harness's output format. Exits with an error if the two runs
 disagree.
+
+The flags are hc_main.py's (`--interchange`, `--tile T`, `--vectorize W`), so
+the middle end runs the same loop passes here as in the compiled executable.
 
 Arguments are read like the harness reads them (back_end/harness_gen.py): one
 integer per scalar and per element, in argument order. Any value not supplied
@@ -20,8 +23,7 @@ import sys
 from xdsl.dialects import func
 from xdsl.dialects.builtin import MemRefType, TensorType
 
-from front_end.build_model import MODEL_PATH
-from hc_main import load_module, resolve_model_path, run_middle_end
+from hc_main import load_module, parse_args, resolve_model_path, run_middle_end
 from simulator.interpreter import Interpreter
 
 
@@ -81,14 +83,15 @@ def format_result(value) -> str:
 
 def main():
     # stdout carries only the result, so the model builders' messages go to stderr.
+    options = parse_args()
     with contextlib.redirect_stdout(sys.stderr):
-        model_path = resolve_model_path(sys.argv[1] if len(sys.argv) > 1 else MODEL_PATH)
+        model_path = resolve_model_path(options.model)
     module = load_module(model_path)
-    args = args_from_argv(_entry(module, "my_func"), [int(v) for v in sys.argv[2:]])
+    args = args_from_argv(_entry(module, "my_func"), options.values)
 
     # Each run gets its own copy: memref.store mutates buffers in place.
     before = Interpreter().run_module(module, args=copy.deepcopy(args), func_name="my_func")
-    run_middle_end(module)
+    run_middle_end(module, options)
     after = Interpreter().run_module(module, args=copy.deepcopy(args), func_name="my_func")
 
     if before != after:

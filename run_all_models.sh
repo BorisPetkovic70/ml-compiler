@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Compiles and runs every sample model through full_compiler.sh with fixed inputs.
-# Usage: [TOOLCHAIN_BIN_DIR=/path/to/llvm/bin] ./run_all_models.sh
+# Usage: [TOOLCHAIN_BIN_DIR=/path/to/llvm/bin] ./run_all_models.sh [--interchange] [--tile T] [--vectorize W]
 
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
+
+# The loop-pass options, passed on to every full_compiler.sh call.
+FLAGS=("$@")
 
 IDENTITY_4X4="1 0 0 0  0 1 0 0  0 0 1 0  0 0 0 1"
 DOUBLE_4X4="2 0 0 0  0 2 0 0  0 0 2 0  0 0 0 2"
@@ -15,7 +18,7 @@ python3 front_end/build_model.py
 run() {
     echo
     echo "==================== $1 ===================="
-    ./full_compiler.sh "$@"
+    ./full_compiler.sh "${FLAGS[@]}" "$@"
 }
 
 # x = 25: relu(min(max(2 * |25 - 40|^2, 0), 1000)) = 450

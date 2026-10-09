@@ -1,11 +1,13 @@
 """Tests for hc_interpret.py's argument reading and result formatting. Both
 must agree with the generated C harness, because full_compiler.sh compares
-the interpreter's printed result with the executable's as text.
+the interpreter's printed result with the executable's as text. One test
+covers the command line hc_interpret.py shares with hc_main.py.
 """
 import pytest
 
 from conftest import parse, _entry_fn
 from hc_interpret import args_from_argv, format_result
+from hc_main import parse_args
 
 
 # One scalar and one 2x2 tensor: three of the harness's argument cases.
@@ -37,3 +39,11 @@ def test_too_many_argument_values_are_rejected():
 ])
 def test_result_is_formatted_like_the_harness_prints_it(value, expected):
     assert format_result(value) == expected
+
+
+def test_command_line_has_flags_then_model_then_values():
+    """The loop-pass flags come first. A negative value is an argument value,
+    not a flag."""
+    options = parse_args(["--interchange", "--tile", "2", "--vectorize", "4", "m.onnx", "7", "-5"])
+    assert (options.interchange, options.tile, options.vectorize) == (True, 2, 4)
+    assert (options.model, options.values) == ("m.onnx", [7, -5])

@@ -239,11 +239,11 @@ The lowering emits the simplest correct loops. Three hand-written passes then ch
 loops run, not what they compute. Each is one small file with one `apply_*` function, and each
 leaves a loop it does not recognize unchanged.
 
-| Pass | Config | What it does |
-|---|---|---|
-| `loop_interchange.py` | `interchange_loops=True` | swaps the two innermost loops of a matmul nest: `i, j, k` becomes `i, k, j` |
-| `loop_tiling.py` | `tile_size=T` | splits the `i` and `k` loops of a matmul nest into a tile loop (`step T`) and a point loop over one tile |
-| `vectorization.py` | `vector_width=W` | runs an innermost loop `W` elements at a time on `vector<Wxi32>` values |
+| Pass | Config | Flag | What it does |
+|---|---|---|---|
+| `loop_interchange.py` | `interchange_loops=True` | `--interchange` | swaps the two innermost loops of a matmul nest: `i, j, k` becomes `i, k, j` |
+| `loop_tiling.py` | `tile_size=T` | `--tile T` | splits the `i` and `k` loops of a matmul nest into a tile loop (`step T`) and a point loop over one tile |
+| `vectorization.py` | `vector_width=W` | `--vectorize W` | runs an innermost loop `W` elements at a time on `vector<Wxi32>` values |
 
 **Interchange.** With `k` innermost, each step of the matmul body reads `B` one row further
 down, a new cache line every time. In `i, k, j` order the innermost loop walks `C` and `B`
@@ -287,6 +287,10 @@ elements left over when `W` does not divide the bound.
   `C[i, j]` on every step, so there is no row to store a vector to. Matmul vectorizes only
   after interchange; an element-wise nest already has its last dim innermost and needs none.
 - Not vectorized: `hc.max`/`hc.min` (an `scf.if` in the body) and `hc.pow` (an inner loop).
+
+`hc_main.py` and `hc_interpret.py` read the flags with one shared parser
+(`hc_main.parse_args`), and `full_compiler.sh` passes them to both. So the interpreter runs
+the same loops as the executable it is compared with.
 
 Vectors exist only as this pass's output. `back_end.sh` lowers them with
 `-convert-vector-to-llvm`, and `llc` emits SIMD instructions for them.
@@ -382,9 +386,8 @@ Each limit below exists because no current workload needs it, not by accident.
 - **Bufferization copies in the top-level block only** (§4). A write inside a loop body that
   would need a copy is refused.
 - **DCE** only scans the function's top-level block, not loop or `if` bodies.
-- **Loop passes** (§5) are switched on from Python only; `hc_main.py` and `hc_interpret.py`
-  have no flags for them. They recognize the nests the lowering emits and do no general
-  legality analysis. Interchange and tiling apply to matmul nests only.
+- **Loop passes** (§5) recognize the nests the lowering emits and do no general legality
+  analysis. Interchange and tiling apply to matmul nests only.
 - **`analysis.py`**: bufferization uses `is_last_use`. The use-def and liveness printing is
   wired to a config flag, but no pass uses it, and its liveness is block-local (it doesn't see
   uses inside nested regions).
