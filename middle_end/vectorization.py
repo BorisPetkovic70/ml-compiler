@@ -109,3 +109,25 @@ def _vectorize(loop: scf.ForOp, width: int) -> None:
     else:
         loop.detach()
         loop.erase()
+
+
+""" 
+%step  = arith.constant W
+%split = arith.constant N - N % W
+for j_vec = 0 to %split step %step:
+  %c_vec = vector.load %C[%i, %j_vec] : memref<...>
+  %b_vec = vector.load %B[%k, %j_vec] : memref<...>
+  %a_scalar = memref.load %A[%i, %k] : memref<...>
+  %a_vec = vector.broadcast %a_scalar : i32 to vector<W x i32>
+  %prod = arith.mulf %a_vec, %b_vec : vector<W x i32>
+  %sum = arith.addf %c_vec, %prod : vector<W x i32>
+  vector.store %sum, %C[%i, %j_vec] : memref<...>, vector<W x i32>
+for j = %split to N:
+  %c = memref.load %C[%i, %j] : memref<...>
+  %b = memref.load %B[%k, %j] : memref<...>
+  %a = memref.load %A[%i, %k] : memref<...>
+  %prod = arith.mulf %a, %b : i32
+  %sum = arith.addf %c, %prod : i32
+  memref.store %sum, %C[%i, %j] : memref<...>
+
+"""
